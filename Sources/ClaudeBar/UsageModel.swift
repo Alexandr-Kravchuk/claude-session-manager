@@ -52,6 +52,12 @@ struct RateWindow {
         return max(60, Date().timeIntervalSince(start))
     }
 
+    var waitToStabilize: TimeInterval? {
+        guard let elapsed, let resetIn = timeUntilReset else { return nil }
+        let wait = usedPercent * (elapsed + resetIn) / 100.0 - elapsed
+        return wait > 60 ? wait : nil
+    }
+
     var burnRatePerHour: Double? {
         guard let secs = elapsed, secs > 300 else { return nil }
         return usedPercent / (secs / 3600)

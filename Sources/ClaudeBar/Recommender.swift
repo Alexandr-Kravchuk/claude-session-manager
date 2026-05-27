@@ -34,11 +34,29 @@ struct Recommender {
             .compactMap { $0 }
             .max() ?? .low
 
-        let headline: String = switch urgency {
-        case .low: "Ready — run large tasks"
-        case .medium: "Caution — some limits"
-        case .high: "Wait or switch model"
-        case .critical: "Stop — limit exhausted"
+        let headline: String
+        switch urgency {
+        case .low:
+            headline = "Ready — run large tasks"
+        case .medium:
+            headline = "Caution — some limits"
+        case .high:
+            let onlyModelsCausedHigh = modelRec?.urgency == .high
+                && sessionRec.urgency < .high
+                && (weeklyRec?.urgency ?? .low) < .high
+            if onlyModelsCausedHigh {
+                headline = "Switch model"
+            } else if sessionRec.urgency == .high {
+                if let wait = snapshot.session.waitToStabilize {
+                    headline = "Wait \(formatDuration(wait)) — session will exhaust"
+                } else {
+                    headline = "Wait — session will exhaust"
+                }
+            } else {
+                headline = "Slow down — weekly pace too high"
+            }
+        case .critical:
+            headline = "Stop — limit exhausted"
         }
 
         return Recommendation(
