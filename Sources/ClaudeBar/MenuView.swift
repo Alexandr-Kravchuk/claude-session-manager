@@ -103,7 +103,7 @@ struct MenuView: View {
                     Spacer()
                     if let projected = window.projectedUsageAtReset {
                         let projInt = Int(projected.rounded())
-                        Text("projected: ~\(min(projInt, 100))%")
+                        Text("projected: ~\(projInt)%")
                             .font(.system(size: 10))
                             .foregroundColor(projected > 90 ? .orange : .secondary)
                     }
