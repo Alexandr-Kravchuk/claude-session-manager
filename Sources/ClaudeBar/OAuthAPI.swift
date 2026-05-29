@@ -5,6 +5,7 @@ enum APIError: LocalizedError {
     case networkError(Error)
     case decodingError
     case httpError(Int)
+    case rateLimited
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +13,7 @@ enum APIError: LocalizedError {
         case .networkError(let e): return "Network error: \(e.localizedDescription)"
         case .decodingError: return "Could not parse response."
         case .httpError(let code): return "HTTP error \(code)"
+        case .rateLimited: return "Rate limited by API."
         }
     }
 }
@@ -48,6 +50,7 @@ enum OAuthAPI {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else { throw APIError.decodingError }
             if http.statusCode == 401 { throw APIError.unauthorized }
+            if http.statusCode == 429 { throw APIError.rateLimited }
             guard http.statusCode == 200 else { throw APIError.httpError(http.statusCode) }
             guard let result = try? JSONDecoder().decode(OAuthUsageResponse.self, from: data) else {
                 throw APIError.decodingError

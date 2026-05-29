@@ -39,7 +39,21 @@ struct Recommender {
         case .low:
             headline = "Ready — run large tasks"
         case .medium:
-            headline = "Caution — some limits"
+            if sessionRec.urgency == .medium {
+                if let wait = snapshot.session.waitToReachProjected(80) {
+                    headline = "Ease off for \(formatDuration(wait))"
+                } else {
+                    headline = "Session running low"
+                }
+            } else if weeklyRec?.urgency == .medium {
+                if let weekly = snapshot.weekly, let wait = weekly.waitToReachProjected(80) {
+                    headline = "Ease off for \(formatDuration(wait))"
+                } else {
+                    headline = "Weekly running low"
+                }
+            } else {
+                headline = "Model limits low"
+            }
         case .high:
             let onlyModelsCausedHigh = modelRec?.urgency == .high
                 && sessionRec.urgency < .high
@@ -77,6 +91,7 @@ struct Recommender {
         let remaining = w.remainingPercent
         let resetIn = w.timeUntilReset ?? .infinity
 
+        // Will exhaust before reset?
         if let projected = w.projectedUsageAtReset, projected >= 100 {
             if let rate = w.burnRatePerHour, rate > 0 {
                 let hoursLeft = (100 - w.usedPercent) / rate
@@ -85,6 +100,7 @@ struct Recommender {
             return WindowEval(urgency: .high, line: "Session will exhaust before reset")
         }
 
+        // Critically low in absolute terms
         if remaining < 10 {
             if resetIn < 15 * 60 {
                 return WindowEval(urgency: .medium, line: "Session nearly empty, resets in \(formatDuration(resetIn))")
@@ -92,11 +108,24 @@ struct Recommender {
             return WindowEval(urgency: .critical, line: "Session exhausted. Resets in \(formatDuration(resetIn))")
         }
 
+        // Pace is high but won't exhaust (projected 85–99%)
+        if let projected = w.projectedUsageAtReset, projected >= 85 {
+            if let wait = w.waitToReachProjected(80) {
+                return WindowEval(urgency: .medium, line: "Session pace high — ease off for \(formatDuration(wait))")
+            }
+            return WindowEval(urgency: .medium, line: "Session pace high — \(Int(projected.rounded()))% projected")
+        }
+
+        // Running low but pace is fine
         if remaining < 25 {
             if resetIn < 30 * 60 {
                 return WindowEval(urgency: .low, line: "\(pct(remaining)) left, resets in \(formatDuration(resetIn))")
             }
-            return WindowEval(urgency: .medium, line: "Session: \(pct(remaining)) left (\(formatDuration(resetIn)) until reset)")
+            // Projected unknown — be cautious
+            if w.projectedUsageAtReset == nil {
+                return WindowEval(urgency: .medium, line: "Session: \(pct(remaining)) left (\(formatDuration(resetIn)) until reset)")
+            }
+            return WindowEval(urgency: .low, line: "\(pct(remaining)) left · resets in \(formatDuration(resetIn))")
         }
 
         if resetIn < 20 * 60 {

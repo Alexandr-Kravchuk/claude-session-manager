@@ -11,6 +11,9 @@ final class UsageStore: ObservableObject {
 
     private var timer: Timer?
     private var cachedToken: String?
+    private var rateLimitedUntil: Date?
+
+    private static let rateLimitBackoff: TimeInterval = 5 * 60
 
     init() {
         Task { await refresh() }
@@ -22,6 +25,15 @@ final class UsageStore: ObservableObject {
     }
 
     func refresh() async {
+        if let until = rateLimitedUntil {
+            if until > Date() {
+                let remaining = until.timeIntervalSinceNow
+                errorMessage = "Rate limited — retrying in \(formatDuration(remaining))"
+                return
+            }
+            rateLimitedUntil = nil
+        }
+
         guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
@@ -36,6 +48,9 @@ final class UsageStore: ObservableObject {
             } else {
                 errorMessage = "No session data from API."
             }
+        } catch APIError.rateLimited {
+            rateLimitedUntil = Date().addingTimeInterval(Self.rateLimitBackoff)
+            errorMessage = "Rate limited — retrying in \(formatDuration(Self.rateLimitBackoff))"
         } catch {
             errorMessage = error.localizedDescription
         }
