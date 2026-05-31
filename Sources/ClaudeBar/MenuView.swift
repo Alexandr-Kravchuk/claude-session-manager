@@ -31,12 +31,30 @@ struct MenuView: View {
         }
         .frame(width: 340)
         .background(Color(NSColor.windowBackgroundColor))
+        .onAppear { Task { await store.refreshIfStale() } }
     }
 
     private var headerSection: some View {
         VStack(spacing: 6) {
             HStack(spacing: 8) {
-                if let rec = store.recommendation {
+                if store.isDegraded {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .font(.system(size: 18))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Data may be outdated")
+                            .font(.system(size: 13, weight: .semibold))
+                        Group {
+                            if let error = store.errorMessage {
+                                Text(error)
+                            } else if let updated = store.lastUpdated {
+                                Text("Updated ") + Text(updated, style: .relative) + Text(" ago")
+                            }
+                        }
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    }
+                } else if let rec = store.recommendation {
                     Image(systemName: rec.statusSymbol)
                         .foregroundColor(store.statusColor)
                         .font(.system(size: 18))
@@ -158,16 +176,17 @@ struct MenuView: View {
 
             HStack {
                 if let updated = store.lastUpdated {
+                    let timeColor = store.isStale ? Color.orange.opacity(0.9) : Color.secondary.opacity(0.7)
                     Text(updated, style: .relative)
                         .font(.system(size: 10))
-                        .foregroundColor(Color.secondary.opacity(0.7))
+                        .foregroundColor(timeColor)
                     + Text(" ago")
                         .font(.system(size: 10))
-                        .foregroundColor(Color.secondary.opacity(0.7))
+                        .foregroundColor(timeColor)
                 }
                 Spacer()
                 Button {
-                    Task { await store.refresh() }
+                    Task { await store.refresh(force: true) }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                         .font(.system(size: 11))

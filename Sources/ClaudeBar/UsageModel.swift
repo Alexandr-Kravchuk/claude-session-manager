@@ -112,6 +112,7 @@ struct UsageSnapshot {
 }
 
 func formatDuration(_ interval: TimeInterval) -> String {
+    guard interval.isFinite else { return "—" }
     let total = Int(max(0, interval))
     let days = total / 86400
     let hours = (total % 86400) / 3600
