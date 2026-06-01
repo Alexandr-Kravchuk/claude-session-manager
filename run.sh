@@ -3,6 +3,8 @@
 set -e
 cd "$(dirname "$0")"
 
+source "$(dirname "$0")/preflight.sh"
+
 pkill -x ClaudeBar 2>/dev/null || true
 sleep 0.3
 

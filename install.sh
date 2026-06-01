@@ -7,6 +7,8 @@ BINARY_DIR="$HOME/.local/bin"
 BINARY_PATH="$BINARY_DIR/ClaudeBar"
 PLIST_PATH="$HOME/Library/LaunchAgents/com.claudebar.app.plist"
 
+source "$(dirname "$0")/preflight.sh"
+
 echo "→ Building release binary..."
 swift build -c release
 

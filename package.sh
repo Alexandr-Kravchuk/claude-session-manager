@@ -7,6 +7,8 @@ APP_NAME="ClaudeBar"
 BUNDLE_ID="com.claudebar.app"
 APP_PATH="/Applications/$APP_NAME.app"
 
+source "$(dirname "$0")/preflight.sh"
+
 echo "→ Building release binary..."
 swift build -c release
 
