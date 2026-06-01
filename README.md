@@ -5,7 +5,7 @@ A macOS menu bar app that shows your Claude Code usage limits and tells you when
 ## Requirements
 
 - macOS 13+
-- Swift toolchain (Xcode or Command Line Tools)
+- Xcode (provides a working Swift toolchain for `swift build`)
 - Claude Code logged in (`claude login`) — ClaudeBar reads the token the CLI keeps in your keychain
 
 ## Install
