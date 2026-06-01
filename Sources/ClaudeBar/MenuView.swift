@@ -106,9 +106,17 @@ struct MenuView: View {
                         .fill(colorForPercent(window.remainingPercent))
                         .frame(width: geo.size.width * CGFloat(window.remainingPercent / 100), height: 6)
                         .animation(.easeInOut(duration: 0.4), value: window.remainingPercent)
+                    if let projected = window.projectedUsageAtReset {
+                        let projectedRemaining = max(0.0, 100.0 - projected)
+                        let markerX = geo.size.width * CGFloat(projectedRemaining / 100.0)
+                        Rectangle()
+                            .fill(Color.white.opacity(0.75))
+                            .frame(width: 2, height: 9)
+                            .offset(x: max(0, min(geo.size.width - 2, markerX - 1)))
+                    }
                 }
             }
-            .frame(height: 6)
+            .frame(height: 9)
 
             if let resetIn = window.timeUntilReset {
                 HStack(spacing: 4) {
@@ -120,8 +128,8 @@ struct MenuView: View {
                         .foregroundColor(.secondary)
                     Spacer()
                     if let projected = window.projectedUsageAtReset {
-                        let projInt = Int(projected.rounded())
-                        Text("projected: ~\(projInt)%")
+                        let atReset = max(0, Int((100.0 - projected).rounded()))
+                        Text("~\(atReset)% left at reset")
                             .font(.system(size: 10))
                             .foregroundColor(projected > 90 ? .orange : .secondary)
                     }
