@@ -48,20 +48,10 @@ struct LaunchAtLogin {
         ]
         let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
         try data.write(to: plistURL)
-        try shell("/bin/launchctl", "load", plistURL.path)
     }
 
     private static func disableViaPlist() throws {
         guard plistExists else { return }
-        try? shell("/bin/launchctl", "unload", plistURL.path)
         try FileManager.default.removeItem(at: plistURL)
-    }
-
-    private static func shell(_ exe: String, _ args: String...) throws {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: exe)
-        p.arguments = args
-        try p.run()
-        p.waitUntilExit()
     }
 }
