@@ -109,7 +109,7 @@ struct MenuView: View {
                         .frame(width: geo.size.width * CGFloat(barPercent / 100), height: 6)
                         .animation(.easeInOut(duration: 0.4), value: barPercent)
                     if let projected = window.projectedUsageAtReset {
-                        let markerPercent = fillBars ? min(100.0, projected) : max(0.0, 100.0 - projected)
+                        let markerPercent = min(100.0, max(0.0, fillBars ? projected : 100.0 - projected))
                         let markerX = geo.size.width * CGFloat(markerPercent / 100.0)
                         Rectangle()
                             .fill(Color.white.opacity(0.75))
