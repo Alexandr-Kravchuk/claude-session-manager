@@ -107,7 +107,7 @@ struct MenuView: View {
                     RoundedRectangle(cornerRadius: 3)
                         .fill(colorForPercent(window.remainingPercent))
                         .frame(width: geo.size.width * CGFloat(barPercent / 100), height: 6)
-                        .animation(.easeInOut(duration: 0.4), value: barPercent)
+                        .animation(.easeInOut(duration: 0.4), value: window.remainingPercent)
                     if let projected = window.projectedUsageAtReset {
                         let markerPercent = min(100.0, max(0.0, fillBars ? projected : 100.0 - projected))
                         let markerX = geo.size.width * CGFloat(markerPercent / 100.0)
@@ -115,6 +115,7 @@ struct MenuView: View {
                             .fill(Color.white.opacity(0.75))
                             .frame(width: 2, height: 9)
                             .offset(x: max(0, min(geo.size.width - 2, markerX - 1)))
+                            .animation(.easeInOut(duration: 0.4), value: markerX)
                     }
                 }
             }
