@@ -11,17 +11,29 @@ final class UsageStore: ObservableObject {
 
     private var timer: Timer?
     private var rateLimitedUntil: Date?
+    private var retryTask: Task<Void, Never>?
+    private var activityWatcher: ActivityWatcher?
+    private var lastAttempt: Date?
 
     private static let rateLimitBackoff: TimeInterval = 5 * 60
     private static let staleThreshold: TimeInterval = 10 * 60
+    /// Minimum gap between any two automatic fetches. Bounds every unforced path
+    /// (timer, activity, retry) regardless of error state, so a sustained failure
+    /// can't turn the 5s ActivityWatcher into an API hammer. Kept below the 60s
+    /// scheduleRetry sleep so the token-expired retry is never swallowed by it.
+    private static let minFetchInterval: TimeInterval = 45
 
     init() {
         Task { await refresh() }
         scheduleTimer()
+        activityWatcher = ActivityWatcher { [weak self] in
+            Task { [weak self] in await self?.refreshOnActivity() }
+        }
     }
 
     deinit {
         timer?.invalidate()
+        retryTask?.cancel()
     }
 
     /// ClaudeBar does not refresh OAuth tokens itself — the Claude Code CLI keeps the
@@ -30,11 +42,19 @@ final class UsageStore: ObservableObject {
     func refresh(force: Bool = false) async {
         guard !isLoading else { return }
 
-        if !force, let until = rateLimitedUntil, until > Date() {
-            errorMessage = "Rate limited — retry in \(formatDuration(until.timeIntervalSinceNow))"
-            return
+        if !force {
+            if let until = rateLimitedUntil, until > Date() {
+                errorMessage = "Rate limited — retry in \(formatDuration(until.timeIntervalSinceNow))"
+                return
+            }
+            // Throttle on last *attempt*, not last success — a frozen lastUpdated
+            // during a sustained error must not let callers slip through.
+            if let lastAttempt, Date().timeIntervalSince(lastAttempt) < Self.minFetchInterval {
+                return
+            }
         }
 
+        lastAttempt = Date()
         isLoading = true
         defer { isLoading = false }
 
@@ -46,6 +66,8 @@ final class UsageStore: ObservableObject {
                 lastUpdated = Date()
                 errorMessage = nil
                 rateLimitedUntil = nil
+                retryTask?.cancel()
+                retryTask = nil
             } else {
                 errorMessage = "No session data from API."
             }
@@ -56,6 +78,7 @@ final class UsageStore: ObservableObject {
             errorMessage = "Rate limited — retry in \(formatDuration(Self.rateLimitBackoff))"
         } catch APIError.tokenExpired {
             errorMessage = APIError.tokenExpired.errorDescription
+            scheduleRetry()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -78,17 +101,23 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    /// Reads the access token the Claude Code CLI maintains in the keychain.
-    /// We deliberately do NOT perform our own OAuth refresh: the refresh token is
-    /// single-use and rotates, so competing with the CLI over the same keychain entry
-    /// triggered daily 429s. A stale token surfaces as `.tokenExpired`, which prompts
-    /// the user to open Claude Code (the CLI refreshes the token there).
+    private func refreshOnActivity() async {
+        guard retryTask == nil else { return }  // pending retry owns error recovery
+        await refresh()  // refresh() self-throttles via lastAttempt, even on errors
+    }
+
     private func resolveToken() throws -> String {
         let credentials = try KeychainReader.readCredentials()
-        guard !credentials.isExpired else {
-            throw APIError.tokenExpired
-        }
         return credentials.accessToken
+    }
+
+    private func scheduleRetry() {
+        guard retryTask == nil else { return }  // already one pending — let it fire
+        retryTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 60_000_000_000) } catch { return }
+            self?.retryTask = nil   // clear before refresh so next failure can re-schedule
+            await self?.refresh()
+        }
     }
 
     private func scheduleTimer() {
