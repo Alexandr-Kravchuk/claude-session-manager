@@ -14,8 +14,21 @@ final class UsageStore: ObservableObject {
     private var retryTask: Task<Void, Never>?
     private var activityWatcher: ActivityWatcher?
     private var lastAttempt: Date?
+    /// Consecutive 429 count. Drives the exponential backoff; reset to 0 on any success.
+    private var rateLimitStreak = 0
 
-    private static let rateLimitBackoff: TimeInterval = 5 * 60
+    /// Backoff doubles with each consecutive 429 — 6 → 12 → 24 → 48 min, capped at 60 —
+    /// instead of a flat 5 min. The old flat interval equalled the refresh cadence and
+    /// livelocked: every refresh landed just as the window expired, re-probed the still-
+    /// active server limit, and re-armed another 5 min, so it never cleared while the app
+    /// ran. A base above the cadence plus exponential growth lets the window actually
+    /// elapse between probes — even the first window (6 min) outlasts the 5-min timer.
+    private static let rateLimitBackoffBase: TimeInterval = 6 * 60
+    private static let rateLimitBackoffCap: TimeInterval = 60 * 60
+    /// Stop counting consecutive 429s once the backoff has reached the cap (streak 5):
+    /// further increments wouldn't change the wait, and this keeps the persisted counter
+    /// small and the `1 <<` shift in rateLimitBackoff(forStreak:) safe from overflow.
+    private static let maxRateLimitStreak = 6
     private static let staleThreshold: TimeInterval = 10 * 60
     /// Minimum gap between any two automatic fetches. Bounds every unforced path
     /// (timer, activity, retry) regardless of error state, so a sustained failure
@@ -23,8 +36,20 @@ final class UsageStore: ObservableObject {
     /// scheduleRetry sleep so the token-expired retry is never swallowed by it.
     private static let minFetchInterval: TimeInterval = 45
 
+    // Persisted across launches so a restart mid-window doesn't immediately re-probe.
+    private static let rateLimitedUntilKey = "com.claudebar.rateLimitedUntil"
+    private static let rateLimitStreakKey = "com.claudebar.rateLimitStreak"
+
     init() {
-        Task { await refresh() }
+        loadPersistedRateLimit()
+        // Skip the startup probe while a persisted backoff window is still active: probing
+        // would hit the live limit and re-arm the backoff. Surface the remaining wait
+        // instead; the timer probes once the window elapses.
+        if let until = rateLimitedUntil, until > Date() {
+            errorMessage = rateLimitedMessage(retryIn: until.timeIntervalSinceNow)
+        } else {
+            Task { await refresh() }
+        }
         scheduleTimer()
         activityWatcher = ActivityWatcher { [weak self] in
             Task { [weak self] in await self?.refreshOnActivity() }
@@ -44,7 +69,7 @@ final class UsageStore: ObservableObject {
 
         if !force {
             if let until = rateLimitedUntil, until > Date() {
-                errorMessage = "Rate limited — retry in \(formatDuration(until.timeIntervalSinceNow))"
+                errorMessage = rateLimitedMessage(retryIn: until.timeIntervalSinceNow)
                 return
             }
             // Throttle on last *attempt*, not last success — a frozen lastUpdated
@@ -61,21 +86,34 @@ final class UsageStore: ObservableObject {
         do {
             let token = try resolveToken()
             let response = try await OAuthAPI.fetchUsage(accessToken: token)
+            // A 200 reached us, so we're no longer rate limited — reset the backoff even
+            // if the body has no decodable session data.
+            clearRateLimit()
+            retryTask?.cancel()
+            retryTask = nil
             if let snap = UsageSnapshot.from(response) {
                 snapshot = snap
                 lastUpdated = Date()
                 errorMessage = nil
-                rateLimitedUntil = nil
-                retryTask?.cancel()
-                retryTask = nil
             } else {
                 errorMessage = "No session data from API."
             }
         } catch APIError.unauthorized {
             errorMessage = APIError.unauthorized.errorDescription
         } catch APIError.rateLimited {
-            rateLimitedUntil = Date().addingTimeInterval(Self.rateLimitBackoff)
-            errorMessage = "Rate limited — retry in \(formatDuration(Self.rateLimitBackoff))"
+            // Only a 429 that starts a *new* window escalates the streak. A manual refresh
+            // (force) probes inside an active window; counting those clicks would let the
+            // user inflate their own backoff and make the displayed retry time dishonest.
+            let now = Date()
+            if let until = rateLimitedUntil, until > now {
+                errorMessage = rateLimitedMessage(retryIn: until.timeIntervalSinceNow)
+            } else {
+                rateLimitStreak = min(rateLimitStreak + 1, Self.maxRateLimitStreak)
+                let backoff = Self.rateLimitBackoff(forStreak: rateLimitStreak)
+                rateLimitedUntil = now.addingTimeInterval(backoff)
+                persistRateLimit()
+                errorMessage = rateLimitedMessage(retryIn: backoff)
+            }
         } catch APIError.tokenExpired {
             errorMessage = APIError.tokenExpired.errorDescription
             scheduleRetry()
@@ -124,6 +162,52 @@ final class UsageStore: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in await self?.refresh() }
         }
+    }
+
+    /// Exponential backoff for the Nth consecutive 429: 6, 12, 24, 48 min, capped at 60.
+    /// `streak` is bounded by maxRateLimitStreak, so the shift can't overflow.
+    private static func rateLimitBackoff(forStreak streak: Int) -> TimeInterval {
+        let multiplier = TimeInterval(1 << max(streak - 1, 0))
+        return min(rateLimitBackoffBase * multiplier, rateLimitBackoffCap)
+    }
+
+    private func rateLimitedMessage(retryIn interval: TimeInterval) -> String {
+        "Rate limited — retry in \(formatDuration(interval))"
+    }
+
+    /// Clear the backoff after a successful fetch so the next limit starts at the base.
+    private func clearRateLimit() {
+        guard rateLimitedUntil != nil || rateLimitStreak != 0 else { return }
+        rateLimitedUntil = nil
+        rateLimitStreak = 0
+        clearPersistedRateLimit()
+    }
+
+    private func persistRateLimit() {
+        guard let until = rateLimitedUntil else { return }
+        let defaults = UserDefaults.standard
+        defaults.set(until.timeIntervalSince1970, forKey: Self.rateLimitedUntilKey)
+        defaults.set(rateLimitStreak, forKey: Self.rateLimitStreakKey)
+    }
+
+    private func clearPersistedRateLimit() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: Self.rateLimitedUntilKey)
+        defaults.removeObject(forKey: Self.rateLimitStreakKey)
+    }
+
+    /// Restore a rate-limit window that outlived the previous process. If it already
+    /// elapsed while we were closed, discard it so the next refresh probes normally.
+    private func loadPersistedRateLimit() {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: Self.rateLimitedUntilKey) != nil else { return }
+        let until = Date(timeIntervalSince1970: defaults.double(forKey: Self.rateLimitedUntilKey))
+        guard until > Date() else {
+            clearPersistedRateLimit()
+            return
+        }
+        rateLimitedUntil = until
+        rateLimitStreak = defaults.integer(forKey: Self.rateLimitStreakKey)
     }
 
     var recommendation: Recommendation? {
