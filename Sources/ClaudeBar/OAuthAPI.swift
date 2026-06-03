@@ -11,7 +11,7 @@ enum APIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unauthorized: return "Token invalid. Run `claude login`."
-        case .tokenExpired: return "Token expired — open Claude Code to refresh"
+        case .tokenExpired: return "Token expired — run 'claude login' in terminal"
         case .networkError(let e): return "Network error: \(e.localizedDescription)"
         case .decodingError: return "Could not parse response."
         case .httpError(let code): return "HTTP error \(code)"
@@ -37,7 +37,7 @@ enum OAuthAPI {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else { throw APIError.decodingError }
-            if http.statusCode == 401 { throw APIError.unauthorized }
+            if http.statusCode == 401 { throw APIError.tokenExpired }
             if http.statusCode == 429 { throw APIError.rateLimited }
             guard http.statusCode == 200 else { throw APIError.httpError(http.statusCode) }
             guard let result = try? JSONDecoder().decode(OAuthUsageResponse.self, from: data) else {
