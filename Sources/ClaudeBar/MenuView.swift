@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MenuView: View {
     @EnvironmentObject var store: UsageStore
+    @AppStorage("com.claudebar.fillBarsAsUsed") private var fillBars = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -102,17 +103,19 @@ struct MenuView: View {
                     RoundedRectangle(cornerRadius: 3)
                         .fill(Color.secondary.opacity(0.15))
                         .frame(height: 6)
+                    let barPercent = min(100.0, max(0.0, fillBars ? window.usedPercent : window.remainingPercent))
                     RoundedRectangle(cornerRadius: 3)
                         .fill(colorForPercent(window.remainingPercent))
-                        .frame(width: geo.size.width * CGFloat(window.remainingPercent / 100), height: 6)
+                        .frame(width: geo.size.width * CGFloat(barPercent / 100), height: 6)
                         .animation(.easeInOut(duration: 0.4), value: window.remainingPercent)
                     if let projected = window.projectedUsageAtReset {
-                        let projectedRemaining = max(0.0, 100.0 - projected)
-                        let markerX = geo.size.width * CGFloat(projectedRemaining / 100.0)
+                        let markerPercent = min(100.0, max(0.0, fillBars ? projected : 100.0 - projected))
+                        let markerX = geo.size.width * CGFloat(markerPercent / 100.0)
                         Rectangle()
                             .fill(Color.white.opacity(0.75))
                             .frame(width: 2, height: 9)
                             .offset(x: max(0, min(geo.size.width - 2, markerX - 1)))
+                            .animation(.easeInOut(duration: 0.4), value: markerX)
                     }
                 }
             }
@@ -178,6 +181,17 @@ struct MenuView: View {
             }
             .padding(.horizontal, 14)
             .padding(.top, 8)
+            .padding(.bottom, 4)
+
+            HStack {
+                Toggle(isOn: $fillBars) {
+                    Text("Fill bars as limit is used")
+                        .font(.system(size: 11))
+                }
+                .toggleStyle(.checkbox)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
             .padding(.bottom, 4)
 
             Divider().padding(.horizontal, 14)
