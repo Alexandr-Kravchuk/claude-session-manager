@@ -2,7 +2,7 @@ import SwiftUI
 
 struct MenuView: View {
     @EnvironmentObject var store: UsageStore
-    @AppStorage("fillBarsAsUsed") private var fillBars = false
+    @AppStorage("com.claudebar.fillBarsAsUsed") private var fillBars = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -103,7 +103,7 @@ struct MenuView: View {
                     RoundedRectangle(cornerRadius: 3)
                         .fill(Color.secondary.opacity(0.15))
                         .frame(height: 6)
-                    let barPercent = fillBars ? window.usedPercent : window.remainingPercent
+                    let barPercent = min(100.0, max(0.0, fillBars ? window.usedPercent : window.remainingPercent))
                     RoundedRectangle(cornerRadius: 3)
                         .fill(colorForPercent(window.remainingPercent))
                         .frame(width: geo.size.width * CGFloat(barPercent / 100), height: 6)
