@@ -95,7 +95,7 @@ struct MenuView: View {
                 Spacer()
                 Text("\(Int(window.remainingPercent.rounded()))% left")
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(colorForPercent(window.remainingPercent))
+                    .foregroundColor(colorForWindow(window))
             }
 
             GeometryReader { geo in
@@ -105,7 +105,7 @@ struct MenuView: View {
                         .frame(height: 6)
                     let barPercent = min(100.0, max(0.0, fillBars ? window.usedPercent : window.remainingPercent))
                     RoundedRectangle(cornerRadius: 3)
-                        .fill(colorForPercent(window.remainingPercent))
+                        .fill(colorForWindow(window))
                         .frame(width: geo.size.width * CGFloat(barPercent / 100), height: 6)
                         .animation(.easeInOut(duration: 0.4), value: window.remainingPercent)
                     if let projected = window.projectedUsageAtReset {
@@ -231,10 +231,11 @@ struct MenuView: View {
         }
     }
 
-    private func colorForPercent(_ remaining: Double) -> Color {
-        if remaining > 40 { return .green }
-        if remaining > 20 { return .yellow }
-        if remaining > 10 { return .orange }
-        return .red
+    private func colorForWindow(_ window: RateWindow) -> Color {
+        guard let projected = window.projectedUsageAtReset else { return .green }
+        let leftAtReset = 100.0 - projected
+        if leftAtReset < 0 { return .red }
+        if leftAtReset < 5 { return .yellow }
+        return .green
     }
 }
