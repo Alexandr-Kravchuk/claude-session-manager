@@ -47,6 +47,7 @@ struct LaunchAtLogin {
             "StandardErrorPath": "/tmp/claudebar.log",
         ]
         let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        // launchd reads ~/Library/LaunchAgents at next login — no manual load needed (it would spawn a duplicate)
         try data.write(to: plistURL)
     }
 
