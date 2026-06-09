@@ -3,24 +3,25 @@ import SwiftUI
 struct MenuView: View {
     @EnvironmentObject var store: UsageStore
     @AppStorage("com.claudebar.fillBarsAsUsed") private var fillBars = false
+    @AppStorage(UsageStore.newPaceUIKey) private var newPaceUI = true
 
     var body: some View {
         VStack(spacing: 0) {
             headerSection
             Divider()
             if let snap = store.snapshot {
-                windowRow(title: "Session (5 hours)", window: snap.session, icon: "clock.fill")
+                windowRow(title: "Session (5 hours)", window: snap.session, icon: "clock.fill", kind: .session)
                 if let weekly = snap.weekly {
                     Divider().padding(.horizontal, 16)
-                    windowRow(title: "Weekly", window: weekly, icon: "calendar")
+                    windowRow(title: "Weekly", window: weekly, icon: "calendar", kind: .weekly)
                 }
                 if let sonnet = snap.sonnetWeekly {
                     Divider().padding(.horizontal, 16)
-                    windowRow(title: "Sonnet (weekly)", window: sonnet, icon: "sparkle")
+                    windowRow(title: "Sonnet (weekly)", window: sonnet, icon: "sparkle", kind: .weekly)
                 }
                 if let opus = snap.opusWeekly {
                     Divider().padding(.horizontal, 16)
-                    windowRow(title: "Opus (weekly)", window: opus, icon: "sparkles")
+                    windowRow(title: "Opus (weekly)", window: opus, icon: "sparkles", kind: .weekly)
                 }
             } else if let error = store.errorMessage {
                 errorSection(message: error)
@@ -84,7 +85,251 @@ struct MenuView: View {
         .padding(.vertical, 12)
     }
 
-    private func windowRow(title: String, window: RateWindow, icon: String) -> some View {
+    @ViewBuilder
+    private func windowRow(title: String, window: RateWindow, icon: String, kind: WindowKind) -> some View {
+        if newPaceUI {
+            paceRow(title: title, window: window, icon: icon, kind: kind)
+        } else {
+            legacyRow(title: title, window: window, icon: icon)
+        }
+    }
+
+    // MARK: - New pace UI
+
+    private func paceRow(title: String, window: RateWindow, icon: String, kind: WindowKind) -> some View {
+        let tier = window.paceTier(kind: kind)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                paceChip(tier, window: window)
+                // Always primary: the measured level is a fact, the pace verdict is a
+                // forecast — they live in separate visual channels.
+                Text("\(Int(window.remainingPercent.rounded()))% left")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.primary)
+            }
+
+            paceBar(window: window, tier: tier, kind: kind)
+
+            if let resetIn = window.timeUntilReset {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                    Text("Resets in \(formatDuration(resetIn))")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    forecastText(window: window, tier: tier, kind: kind)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityText(title: title, window: window, tier: tier, kind: kind))
+    }
+
+    private func paceChip(_ tier: PaceTier, window: RateWindow) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: tier.symbol)
+                .font(.system(size: 8))
+            Text(tier.word)
+                .font(.system(size: 9, weight: .semibold))
+        }
+        .foregroundColor(tier.color)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(tier.color.opacity(0.15)))
+        .layoutPriority(1)
+        .help(chipHelp(window, tier: tier))
+    }
+
+    private func chipHelp(_ window: RateWindow, tier: PaceTier) -> String {
+        // Early-gated forecasts are deliberately untrusted — don't leak them here.
+        guard tier != .early, let projected = window.projectedUsageAtReset else {
+            return "Pace vs even burn — no forecast yet"
+        }
+        return "Pace vs even burn — projected to use \(Int(projected.rounded()))% of this window by reset, at average pace since window start"
+    }
+
+    /// Bullet-style bar: neutral base fill, a tier-colored band for the gap between
+    /// the fill edge and the even-pace caret, and the caret itself. Geometry is shared
+    /// by both fill modes: `a` is the fill edge, `b` the even-pace position.
+    private func paceBar(window: RateWindow, tier: PaceTier, kind: WindowKind) -> some View {
+        GeometryReader { geo in
+            let width = geo.size.width
+            let fillEdge = min(100.0, max(0.0, fillBars ? window.usedPercent : window.remainingPercent))
+            let caret: Double? = window.elapsedFraction.map {
+                min(100.0, max(0.0, (fillBars ? $0 : 1 - $0) * 100))
+            }
+            // Tier-gated: respects the early gate and the anti-flap downgrade, so the
+            // bar can't flash red while the chip says "Early"/"Hot".
+            let overshoot = tier == .runsOut && (window.projectedUsageAtReset ?? 0) >= 100
+
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.secondary.opacity(0.12))
+                    .frame(height: 6)
+
+                if let caret {
+                    let lower = min(fillEdge, caret)
+                    let upper = max(fillEdge, caret)
+                    let band = bandColor(tier: tier, window: window, kind: kind)
+
+                    // Base fill — the undisputed part, no judgment. In remaining mode
+                    // an overshoot dooms what's left, so it tints red. With no verdict
+                    // band the base runs to the actual fill edge, so the bar never
+                    // under-reports the measured level.
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(overshoot && !fillBars ? Color.red.opacity(0.35) : Color.secondary.opacity(0.45))
+                        .frame(width: width * (band == nil ? fillEdge : lower) / 100, height: 6)
+
+                    if let band, upper > lower {
+                        Rectangle()
+                            .fill(band)
+                            .frame(width: max(2, width * (upper - lower) / 100), height: 6)
+                            .offset(x: width * lower / 100)
+                    }
+
+                    if overshoot {
+                        if fillBars {
+                            Rectangle()
+                                .fill(Color.red.opacity(0.35))
+                                .frame(width: width * (100 - upper) / 100, height: 6)
+                                .offset(x: width * upper / 100)
+                            Image(systemName: "arrowtriangle.right.fill")
+                                .font(.system(size: 7))
+                                .foregroundColor(.red)
+                                .shadow(color: Color(NSColor.windowBackgroundColor), radius: 1)
+                                .offset(x: width - 7)
+                        } else {
+                            Image(systemName: "arrowtriangle.left.fill")
+                                .font(.system(size: 7))
+                                .foregroundColor(.red)
+                                .shadow(color: Color(NSColor.windowBackgroundColor), radius: 1)
+                        }
+                    }
+
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.8))
+                        .frame(width: 2, height: 12)
+                        .offset(x: max(0, min(width - 2, width * caret / 100 - 1)))
+                        .help("Even-pace mark — the fill should end near here")
+                } else {
+                    // No reset date — no pace reference, just a neutral level.
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.secondary.opacity(0.45))
+                        .frame(width: width * fillEdge / 100, height: 6)
+                }
+            }
+            .animation(.easeInOut(duration: 0.4), value: window.remainingPercent)
+        }
+        .frame(height: 12)
+    }
+
+    /// Which color the deviation band gets — and whether it's drawn at all. A slow
+    /// session is lunch, not waste, so its surplus stays unpainted except for the
+    /// late-window "use it or lose it" hint.
+    private func bandColor(tier: PaceTier, window: RateWindow, kind: WindowKind) -> Color? {
+        switch tier {
+        case .early:
+            return nil
+        case .idle, .hot, .runsOut:
+            return tier.color
+        case .onPace:
+            if kind == .session {
+                return sessionLateHint(window) ? Color.blue.opacity(0.35) : nil
+            }
+            return tier.color
+        }
+    }
+
+    /// Last hour of the session window with half the quota still projected unused.
+    private func sessionLateHint(_ window: RateWindow) -> Bool {
+        guard let resetIn = window.timeUntilReset, let left = window.projectedLeftAtReset else { return false }
+        return resetIn <= 3600 && left >= 50
+    }
+
+    @ViewBuilder
+    private func forecastText(window: RateWindow, tier: PaceTier, kind: WindowKind) -> some View {
+        let caption = Font.system(size: 10)
+        if kind == .session, sessionLateHint(window),
+           let left = window.projectedLeftAtReset, let resetIn = window.timeUntilReset {
+            Text("~\(Int(left.rounded()))% expires in \(formatDuration(resetIn)) — go big")
+                .font(caption)
+                .foregroundColor(.blue)
+        } else {
+            switch tier {
+            case .early:
+                Text("No forecast yet")
+                    .font(caption)
+                    .italic()
+                    .foregroundColor(.secondary)
+            case .idle:
+                Text("~\(Int((window.projectedLeftAtReset ?? 0).rounded()))% will go unused")
+                    .font(caption)
+                    .foregroundColor(.blue)
+            case .onPace, .hot:
+                // max(0, …): the anti-flap hot state can carry a >100% projection.
+                Text("~\(Int(max(0, window.projectedLeftAtReset ?? 0).rounded()))% left at reset")
+                    .font(caption)
+                    .foregroundColor(tier == .hot ? .orange : .secondary)
+            case .runsOut:
+                Text(runsOutCaption(window))
+                    .font(caption)
+                    .foregroundColor(.red)
+            }
+        }
+    }
+
+    private func runsOutCaption(_ window: RateWindow) -> String {
+        if window.remainingPercent < 5 {
+            return "Exhausted — resets in \(formatDuration(window.timeUntilReset ?? 0))"
+        }
+        if let runOut = window.timeToExhaustion {
+            if let resetIn = window.timeUntilReset, resetIn > runOut {
+                return "Runs out in \(formatDuration(runOut)) — \(formatDuration(resetIn - runOut)) early"
+            }
+            return "Runs out in \(formatDuration(runOut))"
+        }
+        return "Will exhaust before reset"
+    }
+
+    private func accessibilityText(title: String, window: RateWindow, tier: PaceTier, kind: WindowKind) -> String {
+        let pacePhrase: String
+        switch tier {
+        case .early: pacePhrase = "no forecast yet"
+        case .idle: pacePhrase = "idle pace"
+        case .onPace: pacePhrase = "on pace"
+        case .hot: pacePhrase = "hot pace"
+        case .runsOut: pacePhrase = "running out"
+        }
+        var parts = [
+            "\(title): \(Int(window.remainingPercent.rounded())) percent left",
+            pacePhrase,
+        ]
+        if kind == .session, sessionLateHint(window), let left = window.projectedLeftAtReset {
+            parts.append("about \(Int(left.rounded())) percent expires unused before reset")
+        } else if tier != .early, let left = window.projectedLeftAtReset {
+            parts.append(left >= 0
+                ? "about \(Int(left.rounded())) percent left at reset"
+                : "projected to run out before reset")
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    // MARK: - Legacy row
+
+    private func legacyRow(title: String, window: RateWindow, icon: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
@@ -194,6 +439,22 @@ struct MenuView: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 4)
 
+            HStack {
+                // The store reads the same flag for the headroom recommendation and
+                // menubar color; poke it so the label outside this view re-renders.
+                Toggle(isOn: Binding(
+                    get: { newPaceUI },
+                    set: { newPaceUI = $0; store.objectWillChange.send() }
+                )) {
+                    Text("New pace UI")
+                        .font(.system(size: 11))
+                }
+                .toggleStyle(.checkbox)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 4)
+
             Divider().padding(.horizontal, 14)
 
             HStack {
@@ -237,5 +498,17 @@ struct MenuView: View {
         if leftAtReset < 0 { return .red }
         if leftAtReset < 5 { return .yellow }
         return .green
+    }
+}
+
+extension PaceTier {
+    var color: Color {
+        switch self {
+        case .early: return .secondary
+        case .idle: return .blue
+        case .onPace: return .green
+        case .hot: return .orange
+        case .runsOut: return .red
+        }
     }
 }

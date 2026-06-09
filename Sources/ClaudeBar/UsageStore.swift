@@ -210,8 +210,14 @@ final class UsageStore: ObservableObject {
         rateLimitStreak = defaults.integer(forKey: Self.rateLimitStreakKey)
     }
 
+    /// The "new pace UI" feature flag, shared with MenuView's @AppStorage. On by default.
+    static let newPaceUIKey = "com.claudebar.newPaceUI"
+    var newPaceUIEnabled: Bool {
+        UserDefaults.standard.object(forKey: Self.newPaceUIKey) as? Bool ?? true
+    }
+
     var recommendation: Recommendation? {
-        snapshot.map { Recommender(snapshot: $0).recommend() }
+        snapshot.map { Recommender(snapshot: $0, newPaceUI: newPaceUIEnabled).recommend() }
     }
 
     /// The displayed snapshot is older than the staleness threshold, so its
@@ -245,6 +251,9 @@ final class UsageStore: ObservableObject {
 
     var statusColor: Color {
         if snapshot == nil || isStale { return .secondary }
+        // Headroom = blue: the menubar distinguishes "capacity going to waste"
+        // from on-track green.
+        if recommendation?.isHeadroom == true { return .blue }
         switch recommendation?.urgency {
         case .low: return .green
         case .medium: return .yellow

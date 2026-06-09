@@ -11,8 +11,11 @@ struct Recommendation {
     let sessionLine: String
     let weeklyLine: String?
     let modelLine: String?
+    /// Weekly quota is pacing so low that a large share will expire unused.
+    var isHeadroom: Bool = false
 
     var statusSymbol: String {
+        if isHeadroom { return "arrow.up.circle.fill" }
         switch urgency {
         case .low: return "checkmark.circle.fill"
         case .medium: return "exclamationmark.circle.fill"
@@ -24,6 +27,8 @@ struct Recommendation {
 
 struct Recommender {
     let snapshot: UsageSnapshot
+    /// New pace UI: enables the headroom headline and clock-framed exhaust wording.
+    var newPaceUI: Bool = false
 
     func recommend() -> Recommendation {
         let sessionRec = evalSession(snapshot.session)
@@ -33,6 +38,19 @@ struct Recommender {
         let urgency = [sessionRec.urgency, weeklyRec?.urgency, modelRec?.urgency]
             .compactMap { $0 }
             .max() ?? .low
+
+        if newPaceUI, urgency == .low, let weekly = snapshot.weekly,
+           weekly.paceTier(kind: .weekly) == .idle,
+           let left = weekly.projectedLeftAtReset {
+            return Recommendation(
+                urgency: .low,
+                headline: "Headroom — ~\(Int(left.rounded()))% of weekly will go unused",
+                sessionLine: sessionRec.line,
+                weeklyLine: weeklyRec?.line,
+                modelLine: headroomModelLine(),
+                isHeadroom: true
+            )
+        }
 
         let headline: String
         switch urgency {
@@ -61,7 +79,14 @@ struct Recommender {
             if onlyModelsCausedHigh {
                 headline = "Switch model"
             } else if sessionRec.urgency == .high {
-                if let wait = snapshot.session.waitToStabilize {
+                if newPaceUI, snapshot.session.remainingPercent < 5,
+                   let resetIn = snapshot.session.timeUntilReset {
+                    // Already exhausted — a future-tense "runs out in…" would be a lie.
+                    headline = "Session exhausted — resets in \(formatDuration(resetIn))"
+                } else if newPaceUI, let runOut = snapshot.session.timeToExhaustion,
+                   let resetIn = snapshot.session.timeUntilReset, resetIn > runOut {
+                    headline = "Session runs out \(formatDuration(resetIn - runOut)) before reset — ease off"
+                } else if let wait = snapshot.session.waitToStabilize {
                     headline = "Wait \(formatDuration(wait)) — session will exhaust"
                 } else {
                     headline = "Wait — session will exhaust"
@@ -154,6 +179,24 @@ struct Recommender {
             return WindowEval(urgency: .medium, line: "\(label): \(pct(remaining)) left")
         }
         return WindowEval(urgency: .low, line: "\(label): \(pct(remaining)) left · resets in \(formatDuration(resetIn))")
+    }
+
+    /// Which model to push the spare weekly capacity into: the one with the larger
+    /// projected leftover, as long as its own window isn't already tight.
+    private func headroomModelLine() -> String? {
+        let candidates: [(String, RateWindow)] = [
+            ("Opus", snapshot.opusWeekly),
+            ("Sonnet", snapshot.sonnetWeekly),
+        ].compactMap { name, window in window.map { (name, $0) } }
+            .filter { _, window in
+                let tier = window.paceTier(kind: .weekly)
+                return tier != .hot && tier != .runsOut
+            }
+        guard let best = candidates.max(by: {
+            ($0.1.projectedLeftAtReset ?? $0.1.remainingPercent)
+                < ($1.1.projectedLeftAtReset ?? $1.1.remainingPercent)
+        }) else { return nil }
+        return "Run heavy \(best.0) tasks — this capacity expires"
     }
 
     private func evalModels() -> WindowEval? {

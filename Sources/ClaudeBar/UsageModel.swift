@@ -36,6 +36,42 @@ struct OAuthWindow: Decodable {
     }
 }
 
+enum WindowKind {
+    case session
+    case weekly
+}
+
+/// Pace verdict for a rate window: how actual consumption compares to an even burn
+/// across the window. Single source of truth for the chip, the deviation band, the
+/// footer line, and the Recommender, so they can never disagree.
+enum PaceTier {
+    case early      // no trustworthy forecast yet
+    case idle       // weekly only: a large share of the paid quota will expire unused
+    case onPace     // projected to land with a healthy margin
+    case hot        // tight margin projected at reset
+    case runsOut    // projected to exhaust before reset, or already exhausted
+
+    var word: String {
+        switch self {
+        case .early: return "Early"
+        case .idle: return "Idle"
+        case .onPace: return "On pace"
+        case .hot: return "Hot"
+        case .runsOut: return "Runs out"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .early: return "minus.circle"
+        case .idle: return "tortoise"
+        case .onPace: return "checkmark.circle.fill"
+        case .hot: return "hare"
+        case .runsOut: return "flame.fill"
+        }
+    }
+}
+
 struct RateWindow {
     let usedPercent: Double
     let windowDuration: TimeInterval
@@ -68,6 +104,46 @@ struct RateWindow {
     var projectedUsageAtReset: Double? {
         guard let rate = burnRatePerHour, let remaining = timeUntilReset else { return nil }
         return usedPercent + rate * (remaining / 3600)
+    }
+
+    /// Share of the window already behind us, 0…1.
+    var elapsedFraction: Double? {
+        guard let elapsed, windowDuration > 0 else { return nil }
+        return min(1, max(0, elapsed / windowDuration))
+    }
+
+    /// Unclamped: goes negative when the window is projected to exhaust before reset,
+    /// so severity is never silently flattened to a calm "0% left".
+    var projectedLeftAtReset: Double? {
+        projectedUsageAtReset.map { 100 - $0 }
+    }
+
+    /// Time until the quota hits 100% at the average burn rate so far.
+    var timeToExhaustion: TimeInterval? {
+        guard let rate = burnRatePerHour, rate > 0 else { return nil }
+        return remainingPercent / rate * 3600
+    }
+
+    func paceTier(kind: WindowKind) -> PaceTier {
+        guard resetsAt != nil else { return .early }
+        // Measured exhaustion is a fact, not a forecast — don't wait out the
+        // burn-rate warmup before going red.
+        if remainingPercent < 5 { return .runsOut }
+        guard let projected = projectedUsageAtReset,
+              let fraction = elapsedFraction else { return .early }
+        // Too little of the window elapsed to trust a whole-window average — unless
+        // usage is already so high that even an early forecast is clearly real.
+        let earlyGate = kind == .session ? 0.10 : 0.05
+        if fraction < earlyGate && usedPercent < 50 { return .early }
+        if projected >= 100 {
+            // Anti-flap: minutes after a reset the average blows up on a tiny
+            // denominator; don't go red until real usage or time backs it.
+            if usedPercent < 20 && fraction < 0.10 { return .hot }
+            return .runsOut
+        }
+        if projected >= 85 { return .hot }
+        if kind == .weekly && projected < 60 && fraction >= 0.25 { return .idle }
+        return .onPace
     }
 
     static func from(_ window: OAuthWindow?, durationHours: Double) -> RateWindow? {
