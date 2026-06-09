@@ -11,11 +11,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ClaudeBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = UsageStore()
+    @StateObject private var updater = AutoUpdater()
 
     var body: some Scene {
         MenuBarExtra {
             MenuView()
                 .environmentObject(store)
+                .environmentObject(updater)
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: store.menuBarIcon)

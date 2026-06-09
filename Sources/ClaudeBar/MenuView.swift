@@ -2,8 +2,10 @@ import SwiftUI
 
 struct MenuView: View {
     @EnvironmentObject var store: UsageStore
+    @EnvironmentObject var updater: AutoUpdater
     @AppStorage("com.claudebar.fillBarsAsUsed") private var fillBars = false
     @AppStorage(UsageStore.newPaceUIKey) private var newPaceUI = true
+    @AppStorage(AutoUpdater.autoUpdateKey) private var autoUpdate = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -440,8 +442,6 @@ struct MenuView: View {
             .padding(.bottom, 4)
 
             HStack {
-                // The store reads the same flag for the headroom recommendation and
-                // menubar color; poke it so the label outside this view re-renders.
                 Toggle(isOn: Binding(
                     get: { newPaceUI },
                     set: { newPaceUI = $0; store.objectWillChange.send() }
@@ -455,9 +455,32 @@ struct MenuView: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 4)
 
+            HStack {
+                Toggle(isOn: Binding(
+                    get: { autoUpdate },
+                    set: {
+                        autoUpdate = $0
+                        if $0 { updater.startPeriodicCheck() }
+                        else { updater.stopPeriodicCheck() }
+                    }
+                )) {
+                    Text("Auto Update")
+                        .font(.system(size: 11))
+                }
+                .toggleStyle(.checkbox)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 4)
+
             Divider().padding(.horizontal, 14)
 
+            updateSection
+
             HStack {
+                Text("v\(AutoUpdater.currentVersion)")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary.opacity(0.5))
                 if let updated = store.lastUpdated {
                     let timeColor = store.isStale ? Color.orange.opacity(0.9) : Color.secondary.opacity(0.7)
                     Text(updated, style: .relative)
@@ -489,6 +512,61 @@ struct MenuView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
+        }
+    }
+
+    @ViewBuilder
+    private var updateSection: some View {
+        if updater.isUpdating, let progress = updater.progress {
+            HStack(spacing: 6) {
+                ProgressView().scaleEffect(0.5)
+                Text(progress)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            Divider().padding(.horizontal, 14)
+        } else if updater.updateAvailable, let version = updater.latestVersion {
+            HStack {
+                Image(systemName: "arrow.up.circle.fill")
+                    .foregroundColor(.accentColor)
+                    .font(.system(size: 12))
+                Text("v\(version) available")
+                    .font(.system(size: 11, weight: .medium))
+                Spacer()
+                Button("Update") {
+                    Task { await updater.performUpdate() }
+                }
+                .font(.system(size: 11))
+                .buttonStyle(.plain)
+                .foregroundColor(.accentColor)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            Divider().padding(.horizontal, 14)
+        } else if let error = updater.error {
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundColor(.orange)
+                    .font(.system(size: 10))
+                Text(error)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                Button {
+                    Task { await updater.checkForUpdates() }
+                } label: {
+                    Text("Retry")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.accentColor)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 4)
+            Divider().padding(.horizontal, 14)
         }
     }
 
