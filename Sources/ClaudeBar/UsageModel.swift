@@ -1,15 +1,9 @@
 import Foundation
 
+// Deliberately minimal: only the access token is ever parsed from the keychain
+// item — the refresh token and the rest of the CLI's credential JSON are ignored.
 struct ClaudeCredentials {
     let accessToken: String
-    let refreshToken: String?
-    let expiresAt: Date?
-    let rateLimitTier: String?
-
-    var isExpired: Bool {
-        guard let expiresAt else { return false }
-        return Date() >= expiresAt.addingTimeInterval(-60)
-    }
 }
 
 struct OAuthUsageResponse: Decodable {

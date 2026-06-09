@@ -54,9 +54,6 @@ struct KeychainReader {
         }
         struct OAuth: Decodable {
             let accessToken: String?
-            let refreshToken: String?
-            let expiresAt: Double?
-            let rateLimitTier: String?
         }
 
         guard let root = try? JSONDecoder().decode(Root.self, from: data),
@@ -64,12 +61,6 @@ struct KeychainReader {
               let token = oauth.accessToken, !token.isEmpty
         else { throw KeychainError.decodingFailed }
 
-        let expiresAt = oauth.expiresAt.map { Date(timeIntervalSince1970: $0 / 1000) }
-        return ClaudeCredentials(
-            accessToken: token,
-            refreshToken: oauth.refreshToken,
-            expiresAt: expiresAt,
-            rateLimitTier: oauth.rateLimitTier
-        )
+        return ClaudeCredentials(accessToken: token)
     }
 }
