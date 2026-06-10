@@ -85,7 +85,7 @@ struct RateWindow {
     func waitToReachProjected(_ targetPercent: Double) -> TimeInterval? {
         guard let elapsed, let resetIn = timeUntilReset else { return nil }
         let wait = usedPercent * (elapsed + resetIn) / targetPercent - elapsed
-        return wait > 60 ? wait : nil
+        return (wait > 60 && wait < resetIn) ? wait : nil
     }
 
     var waitToStabilize: TimeInterval? { waitToReachProjected(100) }
