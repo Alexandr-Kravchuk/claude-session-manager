@@ -19,7 +19,7 @@ enum UpdateError: LocalizedError {
 
 @MainActor
 final class AutoUpdater: ObservableObject {
-    static let currentVersion = "2.0.0"
+    static let currentVersion = "2.0.1"
     static let autoUpdateKey = "com.claudebar.autoUpdate"
 
     @Published var latestVersion: String?

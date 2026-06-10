@@ -115,9 +115,12 @@ struct Recommender {
     private func evalSession(_ w: RateWindow) -> WindowEval {
         let remaining = w.remainingPercent
         let resetIn = w.timeUntilReset ?? .infinity
+        let tier = w.paceTier(kind: .session)
 
-        // Will exhaust before reset?
-        if let projected = w.projectedUsageAtReset, projected >= 100 {
+        // Will exhaust before reset? — but only once the forecast is trustworthy.
+        // While the tier is .early the projection is noise on a tiny denominator,
+        // and a confident "runs out" headline would contradict the "Early" chip.
+        if tier != .early, let projected = w.projectedUsageAtReset, projected >= 100 {
             if let rate = w.burnRatePerHour, rate > 0 {
                 let hoursLeft = (100 - w.usedPercent) / rate
                 return WindowEval(urgency: .high, line: "Session exhausts in \(formatDuration(hoursLeft * 3600))")
@@ -134,7 +137,7 @@ struct Recommender {
         }
 
         // Pace is high but won't exhaust (projected 85–99%)
-        if let projected = w.projectedUsageAtReset, projected >= 85 {
+        if tier != .early, let projected = w.projectedUsageAtReset, projected >= 85 {
             if let wait = w.waitToReachProjected(80) {
                 return WindowEval(urgency: .medium, line: "Session pace high — ease off for \(formatDuration(wait))")
             }
@@ -163,8 +166,9 @@ struct Recommender {
     private func evalWeekly(_ w: RateWindow, label: String) -> WindowEval {
         let remaining = w.remainingPercent
         let resetIn = w.timeUntilReset ?? .infinity
+        let tier = w.paceTier(kind: .weekly)
 
-        if let projected = w.projectedUsageAtReset {
+        if tier != .early, let projected = w.projectedUsageAtReset {
             if projected >= 100 {
                 return WindowEval(urgency: .high, line: "\(label): limit will exhaust before reset (pace too high)")
             }
