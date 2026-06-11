@@ -493,6 +493,7 @@ struct MenuView: View {
                 Spacer()
                 Button {
                     Task { await store.refresh(force: true) }
+                    Task { await updater.checkForUpdates(autoInstall: true) }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                         .font(.system(size: 11))
