@@ -1,5 +1,7 @@
 #!/bin/bash
-# Build a universal ClaudeBar.app and zip it into dist/ as a GitHub release asset.
+# Build a universal ClaudeBar.app and zip it into dist/ — AD-HOC SIGNED ONLY.
+# For an actual published release use ./notarize-release.sh (Developer ID + notarize +
+# staple); shipping this ad-hoc zip would regress new users to a Gatekeeper warning.
 # Usage: VERSION=x.y.z ./release.sh
 set -e
 cd "$(dirname "$0")"
