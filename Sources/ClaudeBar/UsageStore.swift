@@ -61,8 +61,9 @@ final class UsageStore: ObservableObject {
         retryTask?.cancel()
     }
 
-    /// ClaudeBar does not refresh OAuth tokens itself — the Claude Code CLI keeps the
-    /// keychain token fresh while you use it. We only read that token and fetch usage.
+    /// ClaudeBar never refreshes OAuth tokens itself — it reads a token that something else
+    /// keeps fresh: the Claude desktop app's encrypted token cache (primary) or the CLI's
+    /// keychain token (fallback). See resolveToken. We only read it and fetch usage.
     /// A manual Refresh (`force: true`) bypasses the usage-endpoint rate-limit backoff.
     func refresh(force: Bool = false) async {
         guard !isLoading else { return }
@@ -144,9 +145,15 @@ final class UsageStore: ObservableObject {
         await refresh()  // refresh() self-throttles via lastAttempt, even on errors
     }
 
+    /// Primary source: the token the Claude desktop app keeps continuously fresh in its
+    /// own encrypted store — so we never refresh the rate-limited OAuth token endpoint
+    /// ourselves. Fall back to the standalone CLI's keychain token when the desktop store
+    /// is absent or holds no currently-valid token.
     private func resolveToken() throws -> String {
-        let credentials = try KeychainReader.readCredentials()
-        return credentials.accessToken
+        if let desktop = DesktopTokenReader.currentToken() {
+            return desktop
+        }
+        return try KeychainReader.readCredentials().accessToken
     }
 
     private func scheduleRetry() {
