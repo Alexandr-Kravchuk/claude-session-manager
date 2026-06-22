@@ -285,7 +285,10 @@ final class UsageStore: ObservableObject {
         // Don't anchor on a stale percentage: an old session% for a window that has
         // since reset is exactly the kind of confident-but-wrong number we set out to fix.
         if isStale { return "—" }
-        return "\(Int(snap.session.remainingPercent.rounded()))%"
+        let session = "5h \(Int(snap.session.remainingPercent.rounded()))%"
+        // Weekly may be absent (e.g. older API shape); show session alone then.
+        guard let weekly = snap.weekly else { return session }
+        return "\(session) · 7d \(Int(weekly.remainingPercent.rounded()))%"
     }
 
     var menuBarIcon: String {
