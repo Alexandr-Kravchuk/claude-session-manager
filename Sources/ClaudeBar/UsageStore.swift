@@ -17,6 +17,12 @@ final class UsageStore: ObservableObject {
     /// Consecutive 429 count. Drives the exponential backoff; reset to 0 on any success.
     private var rateLimitStreak = 0
 
+    /// Which token source last returned 200, so the next fetch starts with it instead of
+    /// always probing the desktop token first — saves the extra request while the desktop
+    /// token is server-revoked (401) and we keep succeeding via the CLI keychain token.
+    private enum TokenSource { case desktop, cli }
+    private var preferredTokenSource: TokenSource?
+
     /// Backoff doubles with each consecutive 429 — 6 → 12 → 24 → 48 min, capped at 60 —
     /// instead of a flat 5 min. The old flat interval equalled the refresh cadence and
     /// livelocked: every refresh landed just as the window expired, re-probed the still-
@@ -151,18 +157,26 @@ final class UsageStore: ObservableObject {
     /// it early (e.g. a `claude login` rotates the session and kills the desktop token),
     /// after which it still looks valid here but returns 401. So we keep the CLI token as a
     /// live fallback instead of committing to the desktop token up front. De-duped, ordered.
-    private func candidateTokens() -> [String] {
-        var tokens: [String] = []
-        if let desktop = DesktopTokenReader.currentToken() { tokens.append(desktop) }
-        if let cli = try? KeychainReader.readCredentials().accessToken { tokens.append(cli) }
+    private func candidateTokens() -> [(source: TokenSource, token: String)] {
+        var tokens: [(source: TokenSource, token: String)] = []
+        if let desktop = DesktopTokenReader.currentToken() { tokens.append((.desktop, desktop)) }
+        if let cli = try? KeychainReader.readCredentials().accessToken { tokens.append((.cli, cli)) }
         var seen = Set<String>()
-        return tokens.filter { seen.insert($0).inserted }
+        var deduped = tokens.filter { seen.insert($0.token).inserted }
+        // Start with the source that last worked, so a server-revoked desktop token doesn't
+        // cost a wasted 401 probe on every refresh once the CLI token is carrying us.
+        if let pref = preferredTokenSource,
+           let idx = deduped.firstIndex(where: { $0.source == pref }), idx != 0 {
+            deduped.insert(deduped.remove(at: idx), at: 0)
+        }
+        return deduped
     }
 
-    /// Fetch usage, trying each candidate token until one is accepted. Only an *auth*
-    /// rejection (401) falls through to the next token — a 429 or network error is identical
-    /// for every token, so it propagates immediately instead of being masked. With no token
-    /// available at all, rethrow the keychain's own "run claude login" error.
+    /// Fetch usage, trying each candidate token until one is accepted; remember the source
+    /// that succeeded so the next fetch leads with it. Only an *auth* rejection (401) falls
+    /// through to the next token — a 429 or network error is identical for every token, so it
+    /// propagates immediately instead of being masked. With no token available at all,
+    /// rethrow the keychain's own "run claude login" error.
     private func fetchUsageTryingCandidates() async throws -> OAuthUsageResponse {
         let tokens = candidateTokens()
         guard !tokens.isEmpty else {
@@ -170,8 +184,12 @@ final class UsageStore: ObservableObject {
             throw APIError.unauthorized
         }
         var authError = APIError.tokenExpired
-        for token in tokens {
-            do { return try await OAuthAPI.fetchUsage(accessToken: token) }
+        for candidate in tokens {
+            do {
+                let response = try await OAuthAPI.fetchUsage(accessToken: candidate.token)
+                preferredTokenSource = candidate.source
+                return response
+            }
             catch APIError.tokenExpired { authError = .tokenExpired }
             catch APIError.unauthorized { authError = .unauthorized }
         }
