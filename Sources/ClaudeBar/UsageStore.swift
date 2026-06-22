@@ -63,7 +63,7 @@ final class UsageStore: ObservableObject {
 
     /// ClaudeBar never refreshes OAuth tokens itself — it reads a token that something else
     /// keeps fresh: the Claude desktop app's encrypted token cache (primary) or the CLI's
-    /// keychain token (fallback). See resolveToken. We only read it and fetch usage.
+    /// keychain token (fallback). See candidateTokens. We only read it and fetch usage.
     /// A manual Refresh (`force: true`) bypasses the usage-endpoint rate-limit backoff.
     func refresh(force: Bool = false) async {
         guard !isLoading else { return }
@@ -85,8 +85,7 @@ final class UsageStore: ObservableObject {
         defer { isLoading = false }
 
         do {
-            let token = try resolveToken()
-            let response = try await OAuthAPI.fetchUsage(accessToken: token)
+            let response = try await fetchUsageTryingCandidates()
             // A 200 reached us, so we're no longer rate limited — reset the backoff even
             // if the body has no decodable session data.
             clearRateLimit()
@@ -145,15 +144,38 @@ final class UsageStore: ObservableObject {
         await refresh()  // refresh() self-throttles via lastAttempt, even on errors
     }
 
-    /// Primary source: the token the Claude desktop app keeps continuously fresh in its
-    /// own encrypted store — so we never refresh the rate-limited OAuth token endpoint
-    /// ourselves. Fall back to the standalone CLI's keychain token when the desktop store
-    /// is absent or holds no currently-valid token.
-    private func resolveToken() throws -> String {
-        if let desktop = DesktopTokenReader.currentToken() {
-            return desktop
+    /// The access tokens to try, in priority order: the token the Claude desktop app keeps
+    /// continuously fresh in its own encrypted store (so we never refresh the rate-limited
+    /// OAuth token endpoint ourselves), then the standalone CLI's keychain token. The
+    /// desktop token's `expiresAt` reflects only its *local* clock — the server can revoke
+    /// it early (e.g. a `claude login` rotates the session and kills the desktop token),
+    /// after which it still looks valid here but returns 401. So we keep the CLI token as a
+    /// live fallback instead of committing to the desktop token up front. De-duped, ordered.
+    private func candidateTokens() -> [String] {
+        var tokens: [String] = []
+        if let desktop = DesktopTokenReader.currentToken() { tokens.append(desktop) }
+        if let cli = try? KeychainReader.readCredentials().accessToken { tokens.append(cli) }
+        var seen = Set<String>()
+        return tokens.filter { seen.insert($0).inserted }
+    }
+
+    /// Fetch usage, trying each candidate token until one is accepted. Only an *auth*
+    /// rejection (401) falls through to the next token — a 429 or network error is identical
+    /// for every token, so it propagates immediately instead of being masked. With no token
+    /// available at all, rethrow the keychain's own "run claude login" error.
+    private func fetchUsageTryingCandidates() async throws -> OAuthUsageResponse {
+        let tokens = candidateTokens()
+        guard !tokens.isEmpty else {
+            _ = try KeychainReader.readCredentials()   // throws .notFound → "run claude login"
+            throw APIError.unauthorized
         }
-        return try KeychainReader.readCredentials().accessToken
+        var authError = APIError.tokenExpired
+        for token in tokens {
+            do { return try await OAuthAPI.fetchUsage(accessToken: token) }
+            catch APIError.tokenExpired { authError = .tokenExpired }
+            catch APIError.unauthorized { authError = .unauthorized }
+        }
+        throw authError
     }
 
     private func scheduleRetry() {
