@@ -183,7 +183,11 @@ final class UsageStore: ObservableObject {
     /// live fallback instead of committing to the desktop token up front. De-duped, ordered.
     private func candidateTokens() -> [(source: TokenSource, token: String)] {
         var tokens: [(source: TokenSource, token: String)] = []
-        if let desktop = DesktopTokenReader.currentToken() { tokens.append((.desktop, desktop)) }
+        // The desktop cache holds several tokens under different scopes; try them all, since
+        // the server may have revoked one (e.g. the claude_code session scope after a re-login)
+        // while another is still honoured. Without this we'd stop at the first 401 and fall
+        // through to the CLI token — surfacing "token expired" with a working token in hand.
+        for desktop in DesktopTokenReader.currentTokens() { tokens.append((.desktop, desktop)) }
         if let cli = try? KeychainReader.readCredentials().accessToken { tokens.append((.cli, cli)) }
         var seen = Set<String>()
         var deduped = tokens.filter { seen.insert($0.token).inserted }
