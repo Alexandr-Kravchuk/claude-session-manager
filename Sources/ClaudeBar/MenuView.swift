@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuView: View {
     @EnvironmentObject var store: UsageStore
     @EnvironmentObject var updater: AutoUpdater
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("com.claudebar.fillBarsAsUsed") private var fillBars = false
     @AppStorage(UsageStore.newPaceUIKey) private var newPaceUI = true
     @AppStorage(AutoUpdater.autoUpdateKey) private var autoUpdate = true
@@ -491,6 +492,18 @@ struct MenuView: View {
                         .foregroundColor(timeColor)
                 }
                 Spacer()
+                Button {
+                    openWindow(id: StatisticsWindow.id)
+                    NSApp.activate(ignoringOtherApps: true)
+                } label: {
+                    Label("Statistics", systemImage: "chart.bar.xaxis")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.accentColor)
+
+                Divider().frame(height: 14)
+
                 Button {
                     Task { await store.refresh(force: true) }
                     Task { await updater.checkForUpdates(autoInstall: true) }

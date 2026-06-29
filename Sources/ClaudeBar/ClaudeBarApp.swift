@@ -3,7 +3,9 @@ import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.prohibited)
+        // .accessory (not .prohibited): keeps ClaudeBar out of the Dock and app switcher
+        // while still letting the Statistics window open and take focus when requested.
+        NSApp.setActivationPolicy(.accessory)
     }
 }
 
@@ -28,5 +30,15 @@ struct ClaudeBarApp: App {
             }
         }
         .menuBarExtraStyle(.window)
+
+        Window("Claude Code Statistics", id: StatisticsWindow.id) {
+            StatisticsView()
+                .environmentObject(store)
+        }
+        .windowResizability(.contentMinSize)
     }
+}
+
+enum StatisticsWindow {
+    static let id = "statistics"
 }

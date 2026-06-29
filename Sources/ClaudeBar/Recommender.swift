@@ -29,6 +29,9 @@ struct Recommender {
     let snapshot: UsageSnapshot
     /// New pace UI: enables the headroom headline and clock-framed exhaust wording.
     var newPaceUI: Bool = false
+    /// When the user actually works. Lets a session that would only run out (or reset)
+    /// during their off-hours stop shouting — you can't feel a wall you hit while asleep.
+    var activity: ActivityProfile = .empty
 
     func recommend() -> Recommendation {
         let sessionRec = evalSession(snapshot.session)
@@ -49,6 +52,18 @@ struct Recommender {
                 weeklyLine: weeklyRec?.line,
                 modelLine: headroomModelLine(),
                 isHeadroom: true
+            )
+        }
+
+        // A high session pace that only bites during the user's off-hours was downgraded to
+        // .low in evalSession; surface its calm explanation instead of the generic "Ready".
+        if urgency == .low, let reason = sessionRec.softenedReason {
+            return Recommendation(
+                urgency: .low,
+                headline: reason,
+                sessionLine: sessionRec.line,
+                weeklyLine: weeklyRec?.line,
+                modelLine: modelRec?.line
             )
         }
 
@@ -110,6 +125,9 @@ struct Recommender {
     private struct WindowEval {
         let urgency: Urgency
         let line: String
+        /// Set when off-hours discounting downgraded this window: the calm headline to show
+        /// in place of the alarmist one the raw pace would have produced.
+        var softenedReason: String? = nil
     }
 
     private func evalSession(_ w: RateWindow) -> WindowEval {
@@ -123,6 +141,16 @@ struct Recommender {
         if tier != .early, let projected = w.projectedUsageAtReset, projected >= 100 {
             if let rate = w.burnRatePerHour, rate > 0 {
                 let hoursLeft = (100 - w.usedPercent) / rate
+                // If the wall lands in your off-hours, you'll have stopped before you hit
+                // it — don't raise the alarm, just note it.
+                let exhaustAt = Date().addingTimeInterval(hoursLeft * 3600)
+                if remaining >= 10, activity.isDeadTime(exhaustAt) {
+                    return WindowEval(
+                        urgency: .low,
+                        line: "Session pace high, but runs out during your off-hours",
+                        softenedReason: "Pace high — but you usually stop before it runs out"
+                    )
+                }
                 return WindowEval(urgency: .high, line: "Session exhausts in \(formatDuration(hoursLeft * 3600))")
             }
             return WindowEval(urgency: .high, line: "Session will exhaust before reset")
@@ -138,6 +166,15 @@ struct Recommender {
 
         // Pace is high but won't exhaust (projected 85–99%)
         if tier != .early, let projected = w.projectedUsageAtReset, projected >= 85 {
+            // The window resets while you're off the clock, so "ease off to pace it" is
+            // moot — you'll stop long before the high pace would cost you anything.
+            if let resetsAt = w.resetsAt, activity.isDeadTime(resetsAt) {
+                return WindowEval(
+                    urgency: .low,
+                    line: "Session pace high, but resets during your off-hours",
+                    softenedReason: "Pace high — but it resets while you're away"
+                )
+            }
             if let wait = w.waitToReachProjected(80) {
                 return WindowEval(urgency: .medium, line: "Session pace high — ease off for \(formatDuration(wait))")
             }

@@ -8,6 +8,12 @@ final class UsageStore: ObservableObject {
     @Published var isLoading = false
     @Published var lastUpdated: Date?
     @Published var launchAtLogin: Bool = LaunchAtLogin.isEnabled
+    /// When the user actually works, recomputed from history.jsonl on launch and on each
+    /// new prompt. Feeds the Statistics window and the Recommender's off-hours discounting.
+    @Published var activity: ActivityProfile = .empty
+
+    /// Persisted quota-burn samples backing the Statistics window's "usage over time" chart.
+    let history = UsageHistoryStore()
 
     private var timer: Timer?
     private var rateLimitedUntil: Date?
@@ -48,6 +54,7 @@ final class UsageStore: ObservableObject {
 
     init() {
         loadPersistedRateLimit()
+        reloadActivity()
         // Skip the startup probe while a persisted backoff window is still active: probing
         // would hit the live limit and re-arm the backoff. Surface the remaining wait
         // instead; the timer probes once the window elapses.
@@ -58,7 +65,23 @@ final class UsageStore: ObservableObject {
         }
         scheduleTimer()
         activityWatcher = ActivityWatcher { [weak self] in
-            Task { [weak self] in await self?.refreshOnActivity() }
+            // @MainActor: this closure fires on a non-isolated FSEvents callback, so the Task
+            // must opt into main-actor isolation to call these @MainActor members safely
+            // (matches scheduleTimer's pattern).
+            Task { @MainActor [weak self] in
+                self?.reloadActivity()
+                await self?.refreshOnActivity()
+            }
+        }
+    }
+
+    /// Re-derive the active-hours profile from history.jsonl. The parse (file read + per-line
+    /// JSON) runs off the main actor so a large history file can't stutter the menubar; the
+    /// result is assigned back on the main actor.
+    func reloadActivity() {
+        Task { [weak self] in
+            let profile = await Task.detached(priority: .utility) { ActivityHistory.load() }.value
+            self?.activity = profile
         }
     }
 
@@ -101,6 +124,7 @@ final class UsageStore: ObservableObject {
                 snapshot = snap
                 lastUpdated = Date()
                 errorMessage = nil
+                history.record(snap)
             } else {
                 errorMessage = "No session data from API."
             }
@@ -264,7 +288,7 @@ final class UsageStore: ObservableObject {
     }
 
     var recommendation: Recommendation? {
-        snapshot.map { Recommender(snapshot: $0, newPaceUI: newPaceUIEnabled).recommend() }
+        snapshot.map { Recommender(snapshot: $0, newPaceUI: newPaceUIEnabled, activity: activity).recommend() }
     }
 
     /// The displayed snapshot is older than the staleness threshold, so its
