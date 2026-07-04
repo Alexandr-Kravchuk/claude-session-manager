@@ -6,8 +6,10 @@ import CommonCrypto
 /// itself — the source of the old daily-429 lockups.
 ///
 /// The desktop app (Electron) caches its tokens in
-/// `~/Library/Application Support/Claude/config.json` under the key `oauth:tokenCache`,
-/// as a Chromium `os_crypt` "v10" blob: base64( "v10" + AES-128-CBC ciphertext ), where
+/// `~/Library/Application Support/Claude/config.json` under the keys `oauth:tokenCache` and
+/// `oauth:tokenCacheV2` (both are read and merged — the desktop app has been observed moving
+/// which key holds the live client-9d1c250a entry across releases), each
+/// a Chromium `os_crypt` "v10" blob: base64( "v10" + AES-128-CBC ciphertext ), where
 /// the key = PBKDF2-HMAC-SHA1(secret, "saltysalt", 1003, 16), the secret is the
 /// `Claude Safe Storage` keychain item, and the IV is 16 bytes of 0x20. The decrypted
 /// JSON is keyed `"<clientId>:<org>:<audience>:<space-separated scopes>"` → `{ token,
@@ -50,17 +52,28 @@ enum DesktopTokenReader {
             .map { $0.token }
     }
 
+    /// The desktop app has been observed migrating its live tokens from `oauth:tokenCache`
+    /// to a newer `oauth:tokenCacheV2` key while leaving the old key holding only stale/other
+    /// entries — so both must be decrypted and merged, or the client-`9d1c250a` entry can vanish
+    /// from the key we're looking at entirely (not merely expire) after a desktop update.
+    private static let cacheKeys = ["oauth:tokenCache", "oauth:tokenCacheV2"]
+
     private static func decryptedTokenCache() -> [String: Any]? {
         guard let data = try? Data(contentsOf: configURL),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let blobB64 = root["oauth:tokenCache"] as? String,
-              let blob = Data(base64Encoded: blobB64), blob.count > 3,
               let key = deriveKey() else { return nil }
-        // Strip the 3-byte "v10" version tag; the remainder is AES-128-CBC ciphertext.
-        let ciphertext = blob.subdata(in: 3..<blob.count)
-        guard let plaintext = aes128CBCDecrypt(ciphertext, key: key),
-              let obj = (try? JSONSerialization.jsonObject(with: plaintext)) as? [String: Any] else { return nil }
-        return obj
+
+        var merged: [String: Any] = [:]
+        for cacheKey in cacheKeys {
+            guard let blobB64 = root[cacheKey] as? String,
+                  let blob = Data(base64Encoded: blobB64), blob.count > 3 else { continue }
+            // Strip the 3-byte "v10" version tag; the remainder is AES-128-CBC ciphertext.
+            let ciphertext = blob.subdata(in: 3..<blob.count)
+            guard let plaintext = aes128CBCDecrypt(ciphertext, key: key),
+                  let obj = (try? JSONSerialization.jsonObject(with: plaintext)) as? [String: Any] else { continue }
+            merged.merge(obj) { _, new in new }
+        }
+        return merged.isEmpty ? nil : merged
     }
 
     /// AES-128 key = PBKDF2-HMAC-SHA1(safeStorageSecret, "saltysalt", 1003, 16).
