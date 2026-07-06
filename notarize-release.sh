@@ -18,7 +18,7 @@ ASSET="dist/ClaudeBar-$VERSION-macos-universal.zip"
 NOTARIZE_ZIP="dist/ClaudeBar-notarize.zip"
 
 # --- 1. Build the universal app (package.sh ad-hoc signs; we re-sign below) ---
-echo "→ Building universal app v$VERSION…"
+echo "-> Building universal app v$VERSION..."
 VERSION="$VERSION" APP_PATH="$APP" ./package.sh >/dev/null
 
 # --- 2. Import the Developer ID cert into a throwaway keychain ---
@@ -33,7 +33,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "→ Importing signing certificate…"
+echo "-> Importing signing certificate..."
 security create-keychain -p "$KCPASS" "$KC"
 security set-keychain-settings "$KC"
 security unlock-keychain -p "$KCPASS" "$KC"
@@ -47,18 +47,18 @@ IDENT=$(security find-identity -v -p codesigning "$KC" | grep "Developer ID Appl
 echo "  identity: $IDENT"
 
 # --- 3. Re-sign with Developer ID, hardened runtime, secure timestamp ---
-echo "→ Signing…"
+echo "-> Signing..."
 codesign --force --deep --options runtime --timestamp --sign "$IDENT" "$APP"
 codesign --verify --strict --verbose=2 "$APP"
 
 # --- 4. Notarize ---
-echo "→ Submitting to Apple notary (waits for result)…"
+echo "-> Submitting to Apple notary (waits for result)..."
 ditto -c -k --keepParent "$APP" "$NOTARIZE_ZIP"
 xcrun notarytool submit "$NOTARIZE_ZIP" \
   --key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait
 
 # --- 5. Staple + final asset zip ---
-echo "→ Stapling…"
+echo "-> Stapling..."
 xcrun stapler staple "$APP"
 spctl -a -t exec -vv "$APP"
 

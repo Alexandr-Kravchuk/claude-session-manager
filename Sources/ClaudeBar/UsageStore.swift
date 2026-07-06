@@ -313,10 +313,13 @@ final class UsageStore: ObservableObject {
         // Don't anchor on a stale percentage: an old session% for a window that has
         // since reset is exactly the kind of confident-but-wrong number we set out to fix.
         if isStale { return "—" }
-        let session = "5h \(Int(snap.session.remainingPercent.rounded()))%"
+        if let sessionRecovery = recoveryText(for: snap.session) {
+            return sessionRecovery
+        }
+        let session = menuBarSegment(label: "5h", window: snap.session)
         // Weekly may be absent (e.g. older API shape); show session alone then.
         guard let weekly = snap.weekly else { return session }
-        return "\(session) · 7d \(Int(weekly.remainingPercent.rounded()))%"
+        return "\(session) · \(menuBarSegment(label: "7d", window: weekly))"
     }
 
     var menuBarIcon: String {
@@ -324,6 +327,7 @@ final class UsageStore: ObservableObject {
             return errorMessage == nil ? "bolt.horizontal.circle" : "exclamationmark.triangle.fill"
         }
         if isStale { return "exclamationmark.triangle.fill" }
+        if let snap = snapshot, recoveryText(for: snap.session) != nil { return "sunrise.fill" }
         return recommendation?.statusSymbol ?? "bolt.horizontal.circle"
     }
 
@@ -339,5 +343,27 @@ final class UsageStore: ObservableObject {
         case .critical: return .red
         case nil: return .secondary
         }
+    }
+
+    private func menuBarSegment(label: String, window: RateWindow) -> String {
+        if window.remainingPercent < 5, let recovery = recoveryText(for: window) {
+            return "\(label) \(recovery)"
+        }
+        return "\(label) \(Int(window.remainingPercent.rounded()))%"
+    }
+
+    private func recoveryText(for window: RateWindow) -> String? {
+        guard window.remainingPercent < 5,
+              let resetsAt = window.resetsAt,
+              let resetIn = window.timeUntilReset else { return nil }
+        return "\(formatResetMoment(resetsAt)) (\(formatDuration(resetIn)))"
+    }
+
+    private func formatResetMoment(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.doesRelativeDateFormatting = false
+        formatter.setLocalizedDateFormatFromTemplate(Calendar.autoupdatingCurrent.isDateInToday(date) ? "HHmm" : "dMMMHHmm")
+        return formatter.string(from: date)
     }
 }
