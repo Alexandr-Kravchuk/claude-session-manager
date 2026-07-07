@@ -18,13 +18,10 @@ struct MenuView: View {
                     Divider().padding(.horizontal, 16)
                     windowRow(title: "Weekly", window: weekly, icon: "calendar", kind: .weekly)
                 }
-                if let sonnet = snap.sonnetWeekly {
+                if let scoped = snap.scopedWeekly {
                     Divider().padding(.horizontal, 16)
-                    windowRow(title: "Sonnet (weekly)", window: sonnet, icon: "sparkle", kind: .weekly)
-                }
-                if let opus = snap.opusWeekly {
-                    Divider().padding(.horizontal, 16)
-                    windowRow(title: "Opus (weekly)", window: opus, icon: "sparkles", kind: .weekly)
+                    let title = snap.scopedModelName.map { "\($0) (weekly)" } ?? "Model (weekly)"
+                    windowRow(title: title, window: scoped, icon: "sparkle", kind: .weekly)
                 }
             } else if let error = store.errorMessage {
                 errorSection(message: error)

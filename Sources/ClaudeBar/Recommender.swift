@@ -85,14 +85,14 @@ struct Recommender {
                     headline = "Weekly running low"
                 }
             } else {
-                headline = "Model limits low"
+                headline = "\(scopedModelName) limit low"
             }
         case .high:
             let onlyModelsCausedHigh = modelRec?.urgency == .high
                 && sessionRec.urgency < .high
                 && (weeklyRec?.urgency ?? .low) < .high
             if onlyModelsCausedHigh {
-                headline = "Switch model"
+                headline = "\(scopedModelName) weekly running low"
             } else if sessionRec.urgency == .high {
                 if newPaceUI, snapshot.session.remainingPercent < 5,
                    let resetIn = snapshot.session.timeUntilReset {
@@ -222,44 +222,32 @@ struct Recommender {
         return WindowEval(urgency: .low, line: "\(label): \(pct(remaining)) left · resets in \(formatDuration(resetIn))")
     }
 
-    /// Which model to push the spare weekly capacity into: the one with the larger
-    /// projected leftover, as long as its own window isn't already tight.
+    /// Nudge to spend the per-model weekly capacity that would otherwise expire — only while
+    /// that scoped window isn't itself already tight.
     private func headroomModelLine() -> String? {
-        let candidates: [(String, RateWindow)] = [
-            ("Opus", snapshot.opusWeekly),
-            ("Sonnet", snapshot.sonnetWeekly),
-        ].compactMap { name, window in window.map { (name, $0) } }
-            .filter { _, window in
-                let tier = window.paceTier(kind: .weekly)
-                return tier != .hot && tier != .runsOut
-            }
-        guard let best = candidates.max(by: {
-            ($0.1.projectedLeftAtReset ?? $0.1.remainingPercent)
-                < ($1.1.projectedLeftAtReset ?? $1.1.remainingPercent)
-        }) else { return nil }
-        return "Run heavy \(best.0) tasks — this capacity expires"
+        guard let window = snapshot.scopedWeekly else { return nil }
+        let tier = window.paceTier(kind: .weekly)
+        guard tier != .hot, tier != .runsOut else { return nil }
+        return "Run heavy \(scopedModelName) tasks — this capacity expires"
     }
 
+    /// The endpoint now reports a single per-model weekly cap (`weekly_scoped`) scoped to
+    /// whichever model you're metered against, so there's no second window to switch to —
+    /// just surface it when it's running low.
     private func evalModels() -> WindowEval? {
-        let opus = snapshot.opusWeekly
-        let sonnet = snapshot.sonnetWeekly
-
-        if let o = opus, o.remainingPercent < 20 {
-            if let s = sonnet, s.remainingPercent > 40 {
-                return WindowEval(urgency: .high, line: "Opus nearly exhausted (\(pct(o.remainingPercent))) — switch to Sonnet")
-            }
-            return WindowEval(urgency: .medium, line: "Opus weekly: \(pct(o.remainingPercent)) left")
+        guard let w = snapshot.scopedWeekly else { return nil }
+        let remaining = w.remainingPercent
+        if remaining < 10 {
+            return WindowEval(urgency: .high, line: "\(scopedModelName) weekly: \(pct(remaining)) left")
         }
-
-        if let s = sonnet, s.remainingPercent < 20 {
-            if let o = opus, o.remainingPercent > 40 {
-                return WindowEval(urgency: .medium, line: "Sonnet nearly exhausted (\(pct(s.remainingPercent))) — try Opus")
-            }
-            return WindowEval(urgency: .high, line: "Sonnet weekly: \(pct(s.remainingPercent)) left")
+        if remaining < 20 {
+            return WindowEval(urgency: .medium, line: "\(scopedModelName) weekly: \(pct(remaining)) left")
         }
-
         return nil
     }
+
+    /// Name of the scoped model for user-facing lines, with a neutral fallback.
+    private var scopedModelName: String { snapshot.scopedModelName ?? "Model" }
 }
 
 private func pct(_ v: Double) -> String { "\(Int(v.rounded()))%" }

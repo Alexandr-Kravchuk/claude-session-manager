@@ -7,6 +7,10 @@ struct UsageSample: Codable {
     let t: Double            // epoch seconds
     let session: Double      // % of the 5-hour window used
     let weekly: Double?      // % of the weekly window used, if present
+    let scoped: Double?      // % of the per-model (weekly_scoped) window
+    let scopedModel: String? // display name of the scoped model, e.g. "Fable"
+    // Legacy per-model fields: kept only so pre-Sonnet-5 history still decodes and charts.
+    // New samples never write them (the endpoint stopped populating the fixed windows).
     let sonnet: Double?
     let opus: Double?
 
@@ -46,8 +50,10 @@ final class UsageHistoryStore {
             t: snapshot.fetchedAt.timeIntervalSince1970,
             session: snapshot.session.usedPercent,
             weekly: snapshot.weekly?.usedPercent,
-            sonnet: snapshot.sonnetWeekly?.usedPercent,
-            opus: snapshot.opusWeekly?.usedPercent
+            scoped: snapshot.scopedWeekly?.usedPercent,
+            scopedModel: snapshot.scopedModelName,
+            sonnet: nil,
+            opus: nil
         )
         samples.append(sample)
         append(sample)

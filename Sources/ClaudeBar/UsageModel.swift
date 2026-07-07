@@ -9,14 +9,12 @@ struct ClaudeCredentials {
 struct OAuthUsageResponse: Decodable {
     let fiveHour: OAuthWindow?
     let sevenDay: OAuthWindow?
-    let sevenDaySonnet: OAuthWindow?
-    let sevenDayOpus: OAuthWindow?
+    let limits: [OAuthLimit]?
 
     enum CodingKeys: String, CodingKey {
         case fiveHour = "five_hour"
         case sevenDay = "seven_day"
-        case sevenDaySonnet = "seven_day_sonnet"
-        case sevenDayOpus = "seven_day_opus"
+        case limits
     }
 }
 
@@ -27,6 +25,36 @@ struct OAuthWindow: Decodable {
     enum CodingKeys: String, CodingKey {
         case utilization
         case resetsAt = "resets_at"
+    }
+}
+
+/// One entry of the `limits` array the usage endpoint began returning with the Sonnet-5
+/// rollout. It supersedes the fixed `seven_day_sonnet`/`seven_day_opus` keys (now always
+/// null): the per-model weekly cap is a single `weekly_scoped` entry whose `scope.model`
+/// names whichever model you're currently metered against, so we no longer hardcode names.
+struct OAuthLimit: Decodable {
+    let kind: String?
+    let percent: Double?
+    let resetsAt: String?
+    let scope: OAuthScope?
+
+    enum CodingKeys: String, CodingKey {
+        case kind, percent, scope
+        case resetsAt = "resets_at"
+    }
+}
+
+struct OAuthScope: Decodable {
+    let model: OAuthModel?
+}
+
+struct OAuthModel: Decodable {
+    let id: String?
+    let displayName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case displayName = "display_name"
     }
 }
 
@@ -141,42 +169,54 @@ struct RateWindow {
     }
 
     static func from(_ window: OAuthWindow?, durationHours: Double) -> RateWindow? {
-        guard let window, let utilization = window.utilization else { return nil }
-        let resetsAt: Date? = {
-            guard let str = window.resetsAt, !str.isEmpty else { return nil }
-            let f1 = ISO8601DateFormatter()
-            f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let d = f1.date(from: str) { return d }
-            let f2 = ISO8601DateFormatter()
-            f2.formatOptions = [.withInternetDateTime]
-            return f2.date(from: str)
-        }()
-        return RateWindow(usedPercent: utilization, windowDuration: durationHours * 3600, resetsAt: resetsAt)
+        guard let window else { return nil }
+        return from(percent: window.utilization, resetsAt: window.resetsAt, durationHours: durationHours)
+    }
+
+    /// Build from a bare percent + reset string — shared by the legacy top-level windows and
+    /// the newer `limits` entries, which report `percent` rather than `utilization`.
+    static func from(percent: Double?, resetsAt: String?, durationHours: Double) -> RateWindow? {
+        guard let percent else { return nil }
+        return RateWindow(usedPercent: percent, windowDuration: durationHours * 3600, resetsAt: parseDate(resetsAt))
+    }
+
+    private static func parseDate(_ str: String?) -> Date? {
+        guard let str, !str.isEmpty else { return nil }
+        let f1 = ISO8601DateFormatter()
+        f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f1.date(from: str) { return d }
+        let f2 = ISO8601DateFormatter()
+        f2.formatOptions = [.withInternetDateTime]
+        return f2.date(from: str)
     }
 }
 
 struct UsageSnapshot {
     let session: RateWindow
     let weekly: RateWindow?
-    let sonnetWeekly: RateWindow?
-    let opusWeekly: RateWindow?
+    /// The per-model weekly cap (`weekly_scoped`), scoped to whichever model the plan is
+    /// currently metering — its name lives in `scopedModelName`. Replaces the old fixed
+    /// Sonnet/Opus windows, which the endpoint stopped populating after the Sonnet-5 rollout.
+    let scopedWeekly: RateWindow?
+    let scopedModelName: String?
     let fetchedAt: Date
 
-    init(session: RateWindow, weekly: RateWindow?, sonnetWeekly: RateWindow?, opusWeekly: RateWindow?) {
+    init(session: RateWindow, weekly: RateWindow?, scopedWeekly: RateWindow?, scopedModelName: String?) {
         self.session = session
         self.weekly = weekly
-        self.sonnetWeekly = sonnetWeekly
-        self.opusWeekly = opusWeekly
+        self.scopedWeekly = scopedWeekly
+        self.scopedModelName = scopedModelName
         self.fetchedAt = Date()
     }
 
     static func from(_ response: OAuthUsageResponse) -> UsageSnapshot? {
         guard let session = RateWindow.from(response.fiveHour, durationHours: 5) else { return nil }
+        let scoped = response.limits?.first { $0.kind == "weekly_scoped" }
         return UsageSnapshot(
             session: session,
             weekly: RateWindow.from(response.sevenDay, durationHours: 168),
-            sonnetWeekly: RateWindow.from(response.sevenDaySonnet, durationHours: 168),
-            opusWeekly: RateWindow.from(response.sevenDayOpus, durationHours: 168)
+            scopedWeekly: RateWindow.from(percent: scoped?.percent, resetsAt: scoped?.resetsAt, durationHours: 168),
+            scopedModelName: scoped?.scope?.model?.displayName
         )
     }
 }

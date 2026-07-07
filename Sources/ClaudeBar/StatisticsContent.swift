@@ -161,6 +161,10 @@ struct StatisticsContent: View {
             if let weekly = sample.weekly { points.append(BurnPoint(date: sample.date, series: "Weekly", percent: weekly)) }
             if let opus = sample.opus { points.append(BurnPoint(date: sample.date, series: "Opus (7d)", percent: opus)) }
             if let sonnet = sample.sonnet { points.append(BurnPoint(date: sample.date, series: "Sonnet (7d)", percent: sonnet)) }
+            if let scoped = sample.scoped {
+                let label = sample.scopedModel.map { "\($0) (7d)" } ?? "Model (7d)"
+                points.append(BurnPoint(date: sample.date, series: label, percent: scoped))
+            }
         }
         return points
     }
