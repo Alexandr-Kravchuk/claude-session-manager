@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// One persisted observation of quota utilization. Appended on each successful refresh so
 /// the Statistics window can chart how the 5-hour and weekly windows burn over time — data
@@ -21,8 +22,8 @@ struct UsageSample: Codable {
 /// ~/Library/Application Support/ClaudeBar/usage-history.jsonl. There is no retroactive
 /// data — the quota-burn chart fills in as ClaudeBar keeps running.
 @MainActor
-final class UsageHistoryStore {
-    private(set) var samples: [UsageSample] = []
+final class UsageHistoryStore: ObservableObject {
+    @Published private(set) var samples: [UsageSample] = []
     private let fileURL: URL
 
     /// Record at most one sample per this interval. Activity-driven refreshes can fire
@@ -44,8 +45,6 @@ final class UsageHistoryStore {
 
     /// Append a sample for this snapshot unless the previous one is too recent.
     func record(_ snapshot: UsageSnapshot) {
-        if let last = samples.last,
-           snapshot.fetchedAt.timeIntervalSince(last.date) < Self.minRecordInterval { return }
         let sample = UsageSample(
             t: snapshot.fetchedAt.timeIntervalSince1970,
             session: snapshot.session.usedPercent,
@@ -55,6 +54,23 @@ final class UsageHistoryStore {
             sonnet: nil,
             opus: nil
         )
+
+        if let last = samples.last,
+           snapshot.fetchedAt.timeIntervalSince(last.date) < Self.minRecordInterval {
+            // Keep an open Statistics window current without bloating the persisted log.
+            // Retain the previous timestamp so the next observation after the four-minute
+            // boundary is still appended to disk instead of postponing persistence forever.
+            samples[samples.count - 1] = UsageSample(
+                t: last.t,
+                session: sample.session,
+                weekly: sample.weekly,
+                scoped: sample.scoped,
+                scopedModel: sample.scopedModel,
+                sonnet: sample.sonnet,
+                opus: sample.opus
+            )
+            return
+        }
         samples.append(sample)
         append(sample)
     }

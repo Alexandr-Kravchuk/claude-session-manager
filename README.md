@@ -14,7 +14,7 @@ A macOS menu bar app that shows your Claude Code usage limits and tells you when
 ## Requirements
 
 - macOS 13+
-- Xcode 15+ — Command Line Tools alone are not enough for `swift build`
+- Apple Swift 5.9+ from Xcode or the Command Line Tools
 - Claude Code logged in (`claude login`) — ClaudeBar reads the token the CLI keeps in your keychain
 
 ## Install

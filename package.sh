@@ -12,15 +12,20 @@ APP_PATH="${APP_PATH:-/Applications/$APP_NAME.app}"
 source "$(dirname "$0")/preflight.sh"
 
 echo "→ Building universal release binary (arm64 + x86_64)..."
-swift build -c release --arch arm64 --arch x86_64
-BIN_DIR="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
+swift build -c release --arch arm64
+ARM_BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path)"
+swift build -c release --arch x86_64
+X86_BIN_DIR="$(swift build -c release --arch x86_64 --show-bin-path)"
 
 echo "→ Creating app bundle..."
 rm -rf "$APP_PATH"
 mkdir -p "$APP_PATH/Contents/MacOS"
 mkdir -p "$APP_PATH/Contents/Resources"
 
-cp "$BIN_DIR/$APP_NAME" "$APP_PATH/Contents/MacOS/$APP_NAME"
+lipo -create \
+    "$ARM_BIN_DIR/$APP_NAME" \
+    "$X86_BIN_DIR/$APP_NAME" \
+    -output "$APP_PATH/Contents/MacOS/$APP_NAME"
 cp "Sources/ClaudeBar/Assets/AppIcon.icns" "$APP_PATH/Contents/Resources/AppIcon.icns"
 
 cat > "$APP_PATH/Contents/Info.plist" <<PLIST

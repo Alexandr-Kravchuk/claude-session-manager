@@ -5,18 +5,31 @@ import SwiftUI
 /// charts renderable in isolation for testing.
 struct StatisticsView: View {
     @EnvironmentObject var store: UsageStore
-    @State private var activity: ActivityProfile = .empty
-    @State private var samples: [UsageSample] = []
 
     var body: some View {
-        StatisticsContent(activity: activity, samples: samples)
-            .task { await reload() }
+        StatisticsLiveContent(
+            history: store.history,
+            activity: store.activity,
+            snapshot: store.snapshot,
+            lastUpdated: store.lastUpdated
+        )
     }
+}
 
-    @MainActor
-    private func reload() async {
-        samples = store.history.samples
-        // Parse history.jsonl off the main actor so opening the window never blocks the UI.
-        activity = await Task.detached(priority: .utility) { ActivityHistory.load() }.value
+/// Observes the history store directly. A copy in `@State` only reflected the samples that
+/// existed when the window opened, leaving the chart stale while the menubar kept updating.
+private struct StatisticsLiveContent: View {
+    @ObservedObject var history: UsageHistoryStore
+    let activity: ActivityProfile
+    let snapshot: UsageSnapshot?
+    let lastUpdated: Date?
+
+    var body: some View {
+        StatisticsContent(
+            activity: activity,
+            samples: history.samples,
+            snapshot: snapshot,
+            lastUpdated: lastUpdated
+        )
     }
 }

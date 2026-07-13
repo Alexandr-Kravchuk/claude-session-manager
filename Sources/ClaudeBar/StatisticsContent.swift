@@ -2,95 +2,310 @@ import SwiftUI
 import Charts
 
 /// Pure presentation of the activity profile and recorded quota-burn samples. Takes its data
-/// as plain values so it can be rendered without a live `UsageStore`.
+/// as plain values so it remains independently previewable and testable.
 struct StatisticsContent: View {
     let activity: ActivityProfile
     let samples: [UsageSample]
+    let snapshot: UsageSnapshot?
+    let lastUpdated: Date?
 
-    private let weekdayOrder = [1, 2, 3, 4, 5, 6, 0]   // Mon…Sun, mapped to (weekday-1) indices
+    @State private var tab: StatisticsTab = .usage
+    @State private var range: HistoryRange = .fourteenDays
+
+    private let weekdayOrder = [1, 2, 3, 4, 5, 6, 0]
     private let weekdayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
     var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+
+            Group {
+                switch tab {
+                case .usage: usageTab
+                case .activity: activityTab
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(minWidth: 760, minHeight: 570)
+        .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    private var header: some View {
+        HStack(spacing: 18) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Statistics")
+                    .font(.system(size: 22, weight: .bold))
+                if let lastUpdated {
+                    Text("Live usage updated \(lastUpdated, style: .relative) ago")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Waiting for the first usage update")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            Picker("Section", selection: $tab) {
+                ForEach(StatisticsTab.allCases) { item in
+                    Label(item.title, systemImage: item.icon).tag(item)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(width: 260)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+    }
+
+    // MARK: - Usage
+
+    private var usageTab: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                activitySection
-                Divider()
-                burnSection
+            VStack(alignment: .leading, spacing: 22) {
+                currentUsageCards
+
+                HStack(alignment: .firstTextBaseline) {
+                    sectionHeader("Quota burn", systemImage: "chart.xyaxis.line")
+                    Spacer()
+                    Picker("History range", selection: $range) {
+                        ForEach(HistoryRange.allCases) { item in
+                            Text(item.title).tag(item)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 180)
+                }
+
+                if filteredBurnSeries.count < 2 {
+                    emptyState("Collecting history. The graph fills in while ClaudeBar runs.")
+                } else {
+                    burnChart
+                    HStack(spacing: 6) {
+                        Image(systemName: "info.circle")
+                        Text("Lines show percent used. Drops to zero are quota-window resets; dots are the latest recorded values.")
+                    }
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                }
             }
             .padding(24)
         }
-        .frame(minWidth: 660, minHeight: 560)
-        .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    @ViewBuilder
+    private var currentUsageCards: some View {
+        if let snapshot {
+            HStack(spacing: 12) {
+                usageCard(title: "Session", subtitle: "5 hours", window: snapshot.session, color: .blue)
+                if let weekly = snapshot.weekly {
+                    usageCard(title: "Weekly", subtitle: "7 days", window: weekly, color: .green)
+                }
+                if let scoped = snapshot.scopedWeekly {
+                    usageCard(
+                        title: snapshot.scopedModelName ?? "Model",
+                        subtitle: "7 days",
+                        window: scoped,
+                        color: .purple
+                    )
+                }
+            }
+        } else {
+            emptyState("Waiting for current quota data.")
+        }
+    }
+
+    private func usageCard(title: String, subtitle: String, window: RateWindow, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 14, weight: .semibold))
+                    Text(subtitle).font(.system(size: 10)).foregroundColor(.secondary)
+                }
+                Spacer()
+                Text("\(Int(window.usedPercent.rounded()))%")
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .foregroundColor(color)
+            }
+
+            ProgressView(value: min(100, max(0, window.usedPercent)), total: 100)
+                .tint(color)
+
+            HStack {
+                Text("used")
+                Spacer()
+                Text("\(Int(window.remainingPercent.rounded()))% left")
+            }
+            .font(.system(size: 11))
+            .foregroundColor(.secondary)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 112)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.secondary.opacity(0.07))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    private var burnChart: some View {
+        Chart {
+            ForEach(filteredBurnSeries) { point in
+                LineMark(
+                    x: .value("Time", point.date),
+                    y: .value("Used %", point.percent),
+                    series: .value("Window", point.series)
+                )
+                .foregroundStyle(by: .value("Window", point.series))
+                .interpolationMethod(.linear)
+            }
+
+            ForEach(latestBurnPoints) { point in
+                PointMark(
+                    x: .value("Time", point.date),
+                    y: .value("Used %", point.percent)
+                )
+                .foregroundStyle(by: .value("Window", point.series))
+                .symbolSize(42)
+            }
+        }
+        .chartYScale(domain: 0...100)
+        .chartYAxis {
+            AxisMarks(values: [0, 25, 50, 75, 100]) { value in
+                AxisGridLine()
+                AxisValueLabel {
+                    if let percent = value.as(Int.self) { Text("\(percent)%") }
+                }
+                .font(.system(size: 10))
+            }
+        }
+        .chartXAxis {
+            AxisMarks { _ in
+                AxisGridLine()
+                AxisValueLabel(format: .dateTime.month(.abbreviated).day(), centered: false)
+                    .font(.system(size: 10))
+            }
+        }
+        .chartLegend(position: .top, alignment: .leading, spacing: 16)
+        .frame(height: 290)
+    }
+
+    private var filteredSamples: [UsageSample] {
+        let cutoff = Date().addingTimeInterval(-range.interval)
+        return samples.filter { $0.date >= cutoff }
+    }
+
+    private var filteredBurnSeries: [BurnPoint] {
+        var points: [BurnPoint] = []
+        for sample in filteredSamples {
+            points.append(BurnPoint(date: sample.date, series: "Session (5h)", percent: sample.session))
+            if let weekly = sample.weekly {
+                points.append(BurnPoint(date: sample.date, series: "Weekly", percent: weekly))
+            }
+            if let opus = sample.opus {
+                points.append(BurnPoint(date: sample.date, series: "Opus (7d)", percent: opus))
+            }
+            if let sonnet = sample.sonnet {
+                points.append(BurnPoint(date: sample.date, series: "Sonnet (7d)", percent: sonnet))
+            }
+            if let scoped = sample.scoped {
+                let label = sample.scopedModel.map { "\($0) (7d)" } ?? "Model (7d)"
+                points.append(BurnPoint(date: sample.date, series: label, percent: scoped))
+            }
+        }
+        return points
+    }
+
+    private var latestBurnPoints: [BurnPoint] {
+        Dictionary(grouping: filteredBurnSeries, by: \.series)
+            .compactMap { $0.value.max { $0.date < $1.date } }
     }
 
     // MARK: - Activity
 
-    private var activitySection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionHeader("When you use Claude Code", systemImage: "clock.badge.checkmark")
+    private var activityTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 6) {
+                    sectionHeader("When you use Claude Code", systemImage: "clock.badge.checkmark")
+                    Text(activitySummary)
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
-            if !activitySummary.isEmpty {
-                Text(activitySummary)
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if activity.totalPrompts == 0 {
+                    emptyState("No prompt history found in ~/.claude/history.jsonl yet.")
+                } else {
+                    chartCard(title: "Prompts by hour", caption: "Blue marks your active hours; grey marks rarely used hours.") {
+                        hourlyChart
+                    }
+                    chartCard(title: "Weekly rhythm", caption: "Darker cells mean more prompts in that weekday and hour.") {
+                        heatmap
+                    }
+                }
             }
-
-            if activity.totalPrompts == 0 {
-                emptyState("No prompt history found in ~/.claude/history.jsonl yet.")
-            } else {
-                hourlyChart
-                Text("Prompts by hour of day · blue = your active hours, grey = rarely used")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-
-                heatmap
-                Text("Prompts by weekday × hour — darker means busier")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-            }
+            .padding(24)
         }
     }
 
     private var activitySummary: String {
-        guard activity.totalPrompts > 0 else { return "" }
-        var parts = ["\(activity.totalPrompts) prompts over \(activity.distinctDays) day(s)."]
+        guard activity.totalPrompts > 0 else { return "No activity recorded yet." }
+        var parts = ["\(activity.totalPrompts) prompts across \(activity.distinctDays) active day(s)."]
         if activity.hasEnoughData {
             if let dead = activity.deadRangeDescription {
-                parts.append("You're rarely active \(dead) — ClaudeBar discounts limit resets that fall in this window.")
+                parts.append("You are rarely active \(dead); quota forecasts discount resets in this window.")
             } else {
-                parts.append("Your activity is spread evenly enough that there's no clear off-hours window.")
+                parts.append("Your activity is spread fairly evenly through the day.")
             }
         } else {
-            parts.append("Not enough history yet to detect your off-hours (need ~5 days and 40+ prompts).")
+            parts.append("About 5 days and 40 prompts are needed to detect off-hours reliably.")
         }
         return parts.joined(separator: " ")
     }
 
-    /// A plain-SwiftUI vertical histogram rather than a Swift Charts BarMark: bar widths on
-    /// a quantitative axis render unreliably, and this matches the heatmap's primitives.
+    private func chartCard<Content: View>(
+        title: String,
+        caption: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title).font(.system(size: 14, weight: .semibold))
+            content()
+            Text(caption).font(.system(size: 11)).foregroundColor(.secondary)
+        }
+        .padding(18)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.06)))
+    }
+
     private var hourlyChart: some View {
-        VStack(spacing: 4) {
-            HStack(alignment: .bottom, spacing: 3) {
+        VStack(spacing: 6) {
+            HStack(alignment: .bottom, spacing: 4) {
                 ForEach(0..<24, id: \.self) { hour in
                     let count = activity.hourCounts[hour]
-                    // Height tracks intensity (relative to a typical busy hour, clamped), so a
-                    // single outlier burst doesn't flatten every other bar to nothing.
-                    let height = count > 0 ? max(3, CGFloat(min(1.0, activity.intensity(hour: hour))) * 130) : 0
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(activity.isActive(hour: hour)
-                            ? Color.accentColor
-                            : Color.secondary.opacity(0.35))
+                    let height = count > 0 ? max(4, CGFloat(min(1.0, activity.intensity(hour: hour))) * 150) : 0
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(activity.isActive(hour: hour) ? Color.accentColor : Color.secondary.opacity(0.32))
                         .frame(height: height)
                         .frame(maxWidth: .infinity)
                         .help("\(hour):00 — \(count) prompt(s)")
                 }
             }
-            .frame(height: 130, alignment: .bottom)
-            HStack(spacing: 3) {
+            .frame(height: 150, alignment: .bottom)
+
+            HStack(spacing: 4) {
                 ForEach(0..<24, id: \.self) { hour in
                     Text(hour % 3 == 0 ? "\(hour)" : "")
-                        .font(.system(size: 8))
+                        .font(.system(size: 9))
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity)
                 }
@@ -100,28 +315,28 @@ struct StatisticsContent: View {
 
     private var heatmap: some View {
         let maxCell = max(1, activity.weekdayHourCounts.flatMap { $0 }.max() ?? 0)
-        return VStack(spacing: 3) {
+        return VStack(spacing: 5) {
             ForEach(Array(weekdayOrder.enumerated()), id: \.offset) { row, dayIndex in
-                HStack(spacing: 3) {
+                HStack(spacing: 4) {
                     Text(weekdayNames[row])
-                        .font(.system(size: 9))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.secondary)
-                        .frame(width: 30, alignment: .trailing)
+                        .frame(width: 34, alignment: .trailing)
                     ForEach(0..<24, id: \.self) { hour in
                         let count = activity.weekdayHourCounts[dayIndex][hour]
-                        RoundedRectangle(cornerRadius: 2)
+                        RoundedRectangle(cornerRadius: 3)
                             .fill(cellColor(count: count, max: maxCell))
-                            .frame(height: 16)
+                            .frame(height: 22)
                             .frame(maxWidth: .infinity)
                             .help("\(weekdayNames[row]) \(hour):00 — \(count) prompt(s)")
                     }
                 }
             }
-            HStack(spacing: 3) {
-                Spacer().frame(width: 30)
+            HStack(spacing: 4) {
+                Spacer().frame(width: 34)
                 ForEach(0..<24, id: \.self) { hour in
-                    Text(hour % 6 == 0 ? "\(hour)" : "")
-                        .font(.system(size: 8))
+                    Text(hour % 3 == 0 ? "\(hour)" : "")
+                        .font(.system(size: 9))
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity)
                 }
@@ -135,76 +350,14 @@ struct StatisticsContent: View {
         return Color.accentColor.opacity(0.18 + 0.82 * intensity)
     }
 
-    // MARK: - Quota burn
-
-    private var burnSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionHeader("Quota burn over time", systemImage: "chart.xyaxis.line")
-
-            if burnSeries.count < 2 {
-                emptyState("Collecting data — \(samples.count) sample(s) so far. This chart fills in as ClaudeBar keeps running (no retroactive history).")
-            } else {
-                burnChart
-                Text("Percent of each window used, sampled while ClaudeBar runs. The saw-tooth is each window resetting.")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    /// Flatten samples into chartable (date, series, percent) points, dropping windows that
-    /// never appeared so the legend only lists series we actually have data for.
-    private var burnSeries: [BurnPoint] {
-        var points: [BurnPoint] = []
-        for sample in samples {
-            points.append(BurnPoint(date: sample.date, series: "Session (5h)", percent: sample.session))
-            if let weekly = sample.weekly { points.append(BurnPoint(date: sample.date, series: "Weekly", percent: weekly)) }
-            if let opus = sample.opus { points.append(BurnPoint(date: sample.date, series: "Opus (7d)", percent: opus)) }
-            if let sonnet = sample.sonnet { points.append(BurnPoint(date: sample.date, series: "Sonnet (7d)", percent: sonnet)) }
-            if let scoped = sample.scoped {
-                let label = sample.scopedModel.map { "\($0) (7d)" } ?? "Model (7d)"
-                points.append(BurnPoint(date: sample.date, series: label, percent: scoped))
-            }
-        }
-        return points
-    }
-
-    private var burnChart: some View {
-        Chart(burnSeries) { point in
-            LineMark(
-                x: .value("Time", point.date),
-                y: .value("Used %", point.percent),
-                series: .value("Window", point.series)
-            )
-            .foregroundStyle(by: .value("Window", point.series))
-            .interpolationMethod(.monotone)
-        }
-        .chartYScale(domain: 0...100)
-        .chartYAxis {
-            AxisMarks(values: [0, 25, 50, 75, 100]) { _ in
-                AxisGridLine()
-                AxisValueLabel().font(.system(size: 9))
-            }
-        }
-        .chartXAxis {
-            AxisMarks { _ in
-                AxisGridLine()
-                AxisValueLabel(format: .dateTime.month().day(), centered: false).font(.system(size: 9))
-            }
-        }
-        .chartLegend(position: .top, alignment: .leading)
-        .frame(height: 200)
-    }
-
     // MARK: - Shared
 
     private func sectionHeader(_ title: String, systemImage: String) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 9) {
             Image(systemName: systemImage)
                 .foregroundColor(.accentColor)
-                .font(.system(size: 14))
-            Text(title)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 16))
+            Text(title).font(.system(size: 17, weight: .semibold))
         }
     }
 
@@ -213,9 +366,39 @@ struct StatisticsContent: View {
             .font(.system(size: 12))
             .foregroundColor(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 24)
-            .padding(.horizontal, 16)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
+            .padding(20)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.06)))
+    }
+}
+
+private enum StatisticsTab: String, CaseIterable, Identifiable {
+    case usage
+    case activity
+
+    var id: Self { self }
+    var title: String { self == .usage ? "Usage" : "Activity" }
+    var icon: String { self == .usage ? "chart.xyaxis.line" : "clock" }
+}
+
+private enum HistoryRange: String, CaseIterable, Identifiable {
+    case sevenDays
+    case fourteenDays
+    case thirtyDays
+
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .sevenDays: return "7d"
+        case .fourteenDays: return "14d"
+        case .thirtyDays: return "30d"
+        }
+    }
+    var interval: TimeInterval {
+        switch self {
+        case .sevenDays: return 7 * 86400
+        case .fourteenDays: return 14 * 86400
+        case .thirtyDays: return 30 * 86400
+        }
     }
 }
 
