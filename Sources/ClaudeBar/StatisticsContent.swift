@@ -189,14 +189,41 @@ struct StatisticsContent: View {
             }
         }
         .chartXAxis {
-            AxisMarks { _ in
+            let axis = xAxisStyle
+            AxisMarks(values: .stride(by: axis.unit, count: axis.count)) { value in
                 AxisGridLine()
-                AxisValueLabel(format: .dateTime.month(.abbreviated).day(), centered: false)
-                    .font(.system(size: 10))
+                AxisValueLabel {
+                    if let date = value.as(Date.self) {
+                        VStack(spacing: 1) {
+                            Text(date, format: .dateTime.month(.abbreviated).day())
+                            if axis.showTime {
+                                Text(date, format: .dateTime.hour().minute())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .font(.system(size: 10))
+                    }
+                }
             }
         }
         .chartLegend(position: .top, alignment: .leading, spacing: 16)
         .frame(height: 290)
+    }
+
+    /// The recorded window is often far shorter than the selected range (there is no
+    /// retroactive data), so Charts fits the X domain to the actual samples. Pick a tick
+    /// stride from that real span — otherwise a ~1-day span rounds every automatic tick to
+    /// the same date and the axis prints "Jul 14 · Jul 14 · Jul 15 · Jul 15". Short spans
+    /// also show the time, so ticks within one day stay distinct.
+    private var xAxisStyle: (unit: Calendar.Component, count: Int, showTime: Bool) {
+        let dates = filteredBurnSeries.map(\.date)
+        guard let lo = dates.min(), let hi = dates.max() else { return (.day, 1, false) }
+        switch hi.timeIntervalSince(lo) {
+        case ..<(36 * 3600):   return (.hour, 6, true)    // < 1.5 days
+        case ..<(3 * 86400):   return (.hour, 12, true)   // < 3 days
+        case ..<(9 * 86400):   return (.day, 1, false)
+        default:               return (.day, 3, false)
+        }
     }
 
     private var filteredSamples: [UsageSample] {
