@@ -15,6 +15,9 @@ final class UsageStore: ObservableObject {
     /// Persisted quota-burn samples backing the Statistics window's "usage over time" chart.
     let history = UsageHistoryStore()
 
+    /// Standard macOS banners when a limit crosses into attention-worthy territory.
+    private let notifications = NotificationManager()
+
     private var timer: Timer?
     private var rateLimitedUntil: Date?
     private var retryTask: Task<Void, Never>?
@@ -55,6 +58,7 @@ final class UsageStore: ObservableObject {
     init() {
         loadPersistedRateLimit()
         reloadActivity()
+        notifications.requestAuthorization()
         // Skip the startup probe while a persisted backoff window is still active: probing
         // would hit the live limit and re-arm the backoff. Surface the remaining wait
         // instead; the timer probes once the window elapses.
@@ -125,6 +129,7 @@ final class UsageStore: ObservableObject {
                 lastUpdated = Date()
                 errorMessage = nil
                 history.record(snap)
+                notifications.evaluate(recommendation)
             } else {
                 errorMessage = "No session data from API."
             }

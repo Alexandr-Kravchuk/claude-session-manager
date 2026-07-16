@@ -7,6 +7,7 @@ struct MenuView: View {
     @AppStorage("com.claudebar.fillBarsAsUsed") private var fillBars = false
     @AppStorage(UsageStore.newPaceUIKey) private var newPaceUI = true
     @AppStorage(AutoUpdater.autoUpdateKey) private var autoUpdate = true
+    @AppStorage(NotificationManager.enabledKey) private var notificationsEnabled = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -445,6 +446,17 @@ struct MenuView: View {
                     set: { newPaceUI = $0; store.objectWillChange.send() }
                 )) {
                     Text("New pace UI")
+                        .font(.system(size: 11))
+                }
+                .toggleStyle(.checkbox)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 4)
+
+            HStack {
+                Toggle(isOn: $notificationsEnabled) {
+                    Text("Notify on limit alerts")
                         .font(.system(size: 11))
                 }
                 .toggleStyle(.checkbox)
