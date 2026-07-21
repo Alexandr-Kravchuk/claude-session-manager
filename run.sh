@@ -58,5 +58,9 @@ PLIST
 
 codesign --sign - --force --deep "$APP_PATH" 2>/dev/null
 
-nohup "$APP_PATH/Contents/MacOS/$APP_NAME" > /tmp/claudebar.log 2>&1 &
+# CLAUDEBAR_DEV_BUILD skips AutoUpdater's periodic check for this one process only — a real
+# launch (Finder, login item) never sets it, so auto-update stays on for actual users. Without
+# this, the 10s-delayed check would replace this local build with the latest GitHub release
+# before you ever get to look at it.
+CLAUDEBAR_DEV_BUILD=1 nohup "$APP_PATH/Contents/MacOS/$APP_NAME" > /tmp/claudebar.log 2>&1 &
 echo "ClaudeBar started (PID $!)"

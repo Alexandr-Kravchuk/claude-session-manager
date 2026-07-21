@@ -10,7 +10,7 @@ struct StatisticsContent: View {
     let lastUpdated: Date?
 
     @State private var tab: StatisticsTab = .usage
-    @State private var range: HistoryRange = .fourteenDays
+    @AppStorage("com.claudebar.historyRange") private var range: HistoryRange = .oneDay
 
     private let weekdayOrder = [1, 2, 3, 4, 5, 6, 0]
     private let weekdayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -80,7 +80,7 @@ struct StatisticsContent: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
-                    .frame(width: 180)
+                    .frame(width: 220)
                 }
 
                 if filteredBurnSeries.count < 2 {
@@ -159,6 +159,24 @@ struct StatisticsContent: View {
 
     private var burnChart: some View {
         Chart {
+            ForEach(workHourBands, id: \.start) { band in
+                RectangleMark(
+                    xStart: .value("Start", band.start),
+                    xEnd: .value("End", band.end),
+                    yStart: .value("Low", 0),
+                    yEnd: .value("High", 100)
+                )
+                .foregroundStyle(Color.secondary.opacity(0.09))
+            }
+
+            if range == .sevenDays {
+                ForEach(dayLabelTicks, id: \.self) { day in
+                    RuleMark(x: .value("Day", day))
+                        .foregroundStyle(Color.secondary.opacity(0.4))
+                        .lineStyle(StrokeStyle(lineWidth: 1))
+                }
+            }
+
             ForEach(filteredBurnSeries) { point in
                 LineMark(
                     x: .value("Time", point.date),
@@ -190,24 +208,91 @@ struct StatisticsContent: View {
         }
         .chartXAxis {
             let axis = xAxisStyle
-            AxisMarks(values: .stride(by: axis.unit, count: axis.count)) { value in
+            AxisMarks(values: xAxisTicks) { value in
                 AxisGridLine()
                 AxisValueLabel {
-                    if let date = value.as(Date.self) {
-                        VStack(spacing: 1) {
-                            Text(date, format: .dateTime.month(.abbreviated).day())
-                            if axis.showTime {
-                                Text(date, format: .dateTime.hour().minute())
-                                    .foregroundStyle(.secondary)
+                    if let date = value.as(Date.self), shouldLabelTick(date) {
+                        if range == .sevenDays {
+                            // 7d shows day labels on their own pass below (at noon), so the
+                            // 9:00/18:00 hour ticks only need the time, not a repeated date.
+                            Text(date, format: .dateTime.hour().minute())
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            VStack(spacing: 1) {
+                                Text(date, format: .dateTime.month(.abbreviated).day())
+                                if axis.showTime {
+                                    Text(date, format: .dateTime.hour().minute())
+                                        .foregroundStyle(.secondary)
+                                }
                             }
+                            .font(.system(size: 10))
                         }
-                        .font(.system(size: 10))
+                    }
+                }
+            }
+            if range == .sevenDays {
+                AxisMarks(values: dayLabelTicks) { value in
+                    AxisValueLabel {
+                        if let date = value.as(Date.self) {
+                            Text(date, format: .dateTime.month(.abbreviated).day())
+                                .font(.system(size: 10))
+                        }
                     }
                 }
             }
         }
         .chartLegend(position: .top, alignment: .leading, spacing: 16)
+        .chartForegroundStyleScale(domain: seriesLegendOrder, range: seriesLegendOrder.map(color(forSeries:)))
         .frame(height: 290)
+    }
+
+    /// Grey bands over 9:00–18:00 each day, so the burn curve reads against work hours at a
+    /// glance. Only 1d/7d are zoomed in enough for day-by-day banding to mean anything.
+    private var workHourBands: [(start: Date, end: Date)] {
+        guard range == .oneDay || range == .sevenDays else { return [] }
+        let dates = filteredBurnSeries.map(\.date)
+        guard let lo = dates.min(), let hi = dates.max() else { return [] }
+        let calendar = Calendar.current
+        var bands: [(start: Date, end: Date)] = []
+        var day = calendar.startOfDay(for: lo)
+        while day <= hi {
+            if let start = calendar.date(byAdding: .hour, value: 9, to: day),
+               let end = calendar.date(byAdding: .hour, value: 18, to: day),
+               start < hi, end > lo {
+                bands.append((max(start, lo), min(end, hi)))
+            }
+            guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+            day = next
+        }
+        return bands
+    }
+
+    /// Ticks anchored at midnight and stepped by `xAxisStyle`, instead of Charts' automatic
+    /// `.stride`, which anchors wherever the data happens to start — an arbitrary offset that
+    /// would just as often miss 9:00/18:00 as hit them. Anchoring at midnight with a stride
+    /// that divides both 9 and 24 (3h, used for 1d/7d) makes those work-hour band edges land
+    /// exactly on a tick every time, and keeps every other tick evenly spaced around them.
+    private var xAxisTicks: [Date] {
+        let dates = filteredBurnSeries.map(\.date)
+        guard let lo = dates.min(), let hi = dates.max() else { return [] }
+        let calendar = Calendar.current
+        let axis = xAxisStyle
+        var tick = calendar.startOfDay(for: lo)
+        var ticks: [Date] = []
+        while tick <= hi {
+            if tick >= lo { ticks.append(tick) }
+            guard let next = calendar.date(byAdding: axis.unit, value: axis.count, to: tick) else { break }
+            tick = next
+        }
+        return ticks
+    }
+
+    /// 7d's day labels, kept as their own axis pass at midnight — 2 ticks (6h) clear of the
+    /// previous day's 18:00 and 3 ticks (9h) clear of this day's 9:00 — so they read as a
+    /// separate "which day" row instead of colliding with the hour labels.
+    private var dayLabelTicks: [Date] {
+        xAxisTicks.filter { Calendar.current.component(.hour, from: $0) == 0 }
     }
 
     /// The recorded window is often far shorter than the selected range (there is no
@@ -218,12 +303,48 @@ struct StatisticsContent: View {
     private var xAxisStyle: (unit: Calendar.Component, count: Int, showTime: Bool) {
         let dates = filteredBurnSeries.map(\.date)
         guard let lo = dates.min(), let hi = dates.max() else { return (.day, 1, false) }
+        // 1d/7d share a fixed 3-hour stride — a divisor of both 9 and 24, so xAxisTicks'
+        // midnight anchor puts 9:00 and 18:00 exactly on a tick regardless of span.
+        if range == .oneDay || range == .sevenDays { return (.hour, 3, true) }
         switch hi.timeIntervalSince(lo) {
         case ..<(36 * 3600):   return (.hour, 6, true)    // < 1.5 days
         case ..<(3 * 86400):   return (.hour, 12, true)   // < 3 days
         case ..<(9 * 86400):   return (.day, 1, false)
         default:               return (.day, 3, false)
         }
+    }
+
+    /// The 7d view's 3-hour gridlines are too dense to label every one (56 across the chart
+    /// would overlap into an unreadable smear) — keep the fine gridlines for visual rhythm but
+    /// only draw text at the work-hour band edges (9:00, 18:00), same as 1d where every tick
+    /// (including those two) is labeled. 1d has few enough ticks (8) to label all of them.
+    private func shouldLabelTick(_ date: Date) -> Bool {
+        guard range == .sevenDays else { return true }
+        let hour = Calendar.current.component(.hour, from: date)
+        return hour == 9 || hour == 18
+    }
+
+    /// Fixed per-role colors so a series keeps its color across range filters. Without this,
+    /// SwiftUI Charts assigns colors positionally from the default palette based on which
+    /// series happen to be present — the scoped-model line would jump between orange and
+    /// purple depending on whether legacy "Sonnet (7d)"/"Opus (7d)" samples fall in range.
+    private func color(forSeries series: String) -> Color {
+        switch series {
+        case "Session (5h)": return .blue
+        case "Weekly": return .green
+        case "Sonnet (7d)": return .orange
+        case "Opus (7d)": return .red
+        default: return .purple // scoped-model line, e.g. "Fable (7d)" — matches the card above
+        }
+    }
+
+    /// Stable legend order: fixed windows first, then any per-model series present.
+    private var seriesLegendOrder: [String] {
+        let fixed = ["Session (5h)", "Weekly", "Opus (7d)", "Sonnet (7d)"]
+        let present = Set(filteredBurnSeries.map(\.series))
+        var order = fixed.filter(present.contains)
+        order.append(contentsOf: present.subtracting(fixed).sorted())
+        return order
     }
 
     private var filteredSamples: [UsageSample] {
@@ -408,6 +529,7 @@ private enum StatisticsTab: String, CaseIterable, Identifiable {
 }
 
 private enum HistoryRange: String, CaseIterable, Identifiable {
+    case oneDay
     case sevenDays
     case fourteenDays
     case thirtyDays
@@ -415,6 +537,7 @@ private enum HistoryRange: String, CaseIterable, Identifiable {
     var id: Self { self }
     var title: String {
         switch self {
+        case .oneDay: return "1d"
         case .sevenDays: return "7d"
         case .fourteenDays: return "14d"
         case .thirtyDays: return "30d"
@@ -422,6 +545,7 @@ private enum HistoryRange: String, CaseIterable, Identifiable {
     }
     var interval: TimeInterval {
         switch self {
+        case .oneDay: return 1 * 86400
         case .sevenDays: return 7 * 86400
         case .fourteenDays: return 14 * 86400
         case .thirtyDays: return 30 * 86400

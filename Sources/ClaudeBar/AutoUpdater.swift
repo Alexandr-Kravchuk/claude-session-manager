@@ -19,7 +19,7 @@ enum UpdateError: LocalizedError {
 
 @MainActor
 final class AutoUpdater: ObservableObject {
-    static let currentVersion = "2.7.0"
+    static let currentVersion = "2.8.0"
     static let autoUpdateKey = "com.claudebar.autoUpdate"
 
     @Published var latestVersion: String?
@@ -35,6 +35,10 @@ final class AutoUpdater: ObservableObject {
     private static let checkInterval: TimeInterval = 6 * 3600
 
     init() {
+        // Set only by run.sh's local dev launches — never by a real install (Finder, login
+        // item) — so a self-built dev binary can't auto-replace itself with the latest
+        // GitHub release mid-session while real users keep normal auto-update behavior.
+        guard ProcessInfo.processInfo.environment["CLAUDEBAR_DEV_BUILD"] == nil else { return }
         let auto = UserDefaults.standard.object(forKey: Self.autoUpdateKey) as? Bool ?? true
         if auto {
             startPeriodicCheck()
