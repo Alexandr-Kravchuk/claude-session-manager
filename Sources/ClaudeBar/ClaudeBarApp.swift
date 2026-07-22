@@ -6,6 +6,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // .accessory (not .prohibited): keeps ClaudeBar out of the Dock and app switcher
         // while still letting the Statistics window open and take focus when requested.
         NSApp.setActivationPolicy(.accessory)
+        #if DEBUG
+        runFastBurnBandsSelfCheck()
+        #endif
     }
 }
 

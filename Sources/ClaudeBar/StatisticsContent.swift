@@ -15,6 +15,11 @@ struct StatisticsContent: View {
     private let weekdayOrder = [1, 2, 3, 4, 5, 6, 0]
     private let weekdayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
+    // Background band tints. Kept subtle on-chart (they cover a large area); the legend
+    // swatches use a stronger opacity so a small chip stays legible.
+    private let workHourTint = Color.secondary
+    private let overRateTint = Color.red
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -80,16 +85,19 @@ struct StatisticsContent: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
-                    .frame(width: 220)
+                    .frame(width: 280)
                 }
 
                 if filteredBurnSeries.count < 2 {
                     emptyState("Collecting history. The graph fills in while ClaudeBar runs.")
                 } else {
-                    burnChart
+                    VStack(alignment: .leading, spacing: 12) {
+                        burnChart
+                        chartLegend
+                    }
                     HStack(spacing: 6) {
                         Image(systemName: "info.circle")
-                        Text("Lines show percent used. Drops to zero are quota-window resets; dots are the latest recorded values.")
+                        Text("Lines show percent used; drops to zero are quota-window resets; dots are the latest recorded values.")
                     }
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
@@ -166,7 +174,17 @@ struct StatisticsContent: View {
                     yStart: .value("Low", 0),
                     yEnd: .value("High", 100)
                 )
-                .foregroundStyle(Color.secondary.opacity(0.09))
+                .foregroundStyle(workHourTint.opacity(0.09))
+            }
+
+            ForEach(overRateBands, id: \.start) { band in
+                RectangleMark(
+                    xStart: .value("Start", band.start),
+                    xEnd: .value("End", band.end),
+                    yStart: .value("Low", 0),
+                    yEnd: .value("High", 100)
+                )
+                .foregroundStyle(overRateTint.opacity(0.12))
             }
 
             if range == .sevenDays {
@@ -242,15 +260,49 @@ struct StatisticsContent: View {
                 }
             }
         }
-        .chartLegend(position: .top, alignment: .leading, spacing: 16)
+        .chartLegend(.hidden)   // replaced by the unified custom legend below the chart
         .chartForegroundStyleScale(domain: seriesLegendOrder, range: seriesLegendOrder.map(color(forSeries:)))
         .frame(height: 290)
     }
 
+    /// One legend for everything the chart draws — line series and background bands — so every
+    /// color is spelled out in a single place under the chart. Band swatches only appear when
+    /// that band can be drawn for the current range.
+    private var chartLegend: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 16) {
+                ForEach(seriesLegendOrder, id: \.self) { series in
+                    legendItem(Circle().fill(color(forSeries: series)).frame(width: 9, height: 9), series)
+                }
+            }
+            HStack(spacing: 16) {
+                if !workHourBands.isEmpty {
+                    legendItem(bandSwatch(workHourTint.opacity(0.18)), "Work hours (9:00–18:00)")
+                }
+                legendItem(bandSwatch(overRateTint.opacity(0.25)), "Faster than normal (>20 %/h)")
+            }
+        }
+    }
+
+    private func legendItem(_ swatch: some View, _ label: String) -> some View {
+        HStack(spacing: 6) {
+            swatch
+            Text(label).font(.system(size: 11)).foregroundColor(.secondary)
+        }
+    }
+
+    private func bandSwatch(_ fill: Color) -> some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(fill)
+            .frame(width: 18, height: 11)
+            .overlay(RoundedRectangle(cornerRadius: 2).stroke(Color.secondary.opacity(0.3), lineWidth: 0.5))
+    }
+
     /// Grey bands over 9:00–18:00 each day, so the burn curve reads against work hours at a
-    /// glance. Only 1d/7d are zoomed in enough for day-by-day banding to mean anything.
+    /// glance. Only the intraday ranges (6h/12h/1d) and 7d are zoomed in enough for day-by-day
+    /// banding to mean anything.
     private var workHourBands: [(start: Date, end: Date)] {
-        guard range == .oneDay || range == .sevenDays else { return [] }
+        guard [.sixHours, .twelveHours, .oneDay, .sevenDays].contains(range) else { return [] }
         let dates = filteredBurnSeries.map(\.date)
         guard let lo = dates.min(), let hi = dates.max() else { return [] }
         let calendar = Calendar.current
@@ -267,6 +319,9 @@ struct StatisticsContent: View {
         }
         return bands
     }
+
+    /// Red bands over stretches where the 5h session line climbed faster than "normal".
+    private var overRateBands: [(start: Date, end: Date)] { fastBurnBands(in: filteredSamples) }
 
     /// Ticks anchored at midnight and stepped by `xAxisStyle`, instead of Charts' automatic
     /// `.stride`, which anchors wherever the data happens to start — an arbitrary offset that
@@ -303,9 +358,10 @@ struct StatisticsContent: View {
     private var xAxisStyle: (unit: Calendar.Component, count: Int, showTime: Bool) {
         let dates = filteredBurnSeries.map(\.date)
         guard let lo = dates.min(), let hi = dates.max() else { return (.day, 1, false) }
-        // 1d/7d share a fixed 3-hour stride — a divisor of both 9 and 24, so xAxisTicks'
-        // midnight anchor puts 9:00 and 18:00 exactly on a tick regardless of span.
-        if range == .oneDay || range == .sevenDays { return (.hour, 3, true) }
+        // 6h/12h/1d/7d use a fixed hour stride that divides 9 — so xAxisTicks' midnight anchor
+        // puts 9:00 and 18:00 exactly on a tick (the work-hour band edges) regardless of span.
+        if range == .sixHours { return (.hour, 1, true) }   // 6h span too short for a 3h stride
+        if range == .twelveHours || range == .oneDay || range == .sevenDays { return (.hour, 3, true) }
         switch hi.timeIntervalSince(lo) {
         case ..<(36 * 3600):   return (.hour, 6, true)    // < 1.5 days
         case ..<(3 * 86400):   return (.hour, 12, true)   // < 3 days
@@ -529,6 +585,8 @@ private enum StatisticsTab: String, CaseIterable, Identifiable {
 }
 
 private enum HistoryRange: String, CaseIterable, Identifiable {
+    case sixHours
+    case twelveHours
     case oneDay
     case sevenDays
     case fourteenDays
@@ -537,6 +595,8 @@ private enum HistoryRange: String, CaseIterable, Identifiable {
     var id: Self { self }
     var title: String {
         switch self {
+        case .sixHours: return "6h"
+        case .twelveHours: return "12h"
         case .oneDay: return "1d"
         case .sevenDays: return "7d"
         case .fourteenDays: return "14d"
@@ -545,6 +605,8 @@ private enum HistoryRange: String, CaseIterable, Identifiable {
     }
     var interval: TimeInterval {
         switch self {
+        case .sixHours: return 6 * 3600
+        case .twelveHours: return 12 * 3600
         case .oneDay: return 1 * 86400
         case .sevenDays: return 7 * 86400
         case .fourteenDays: return 14 * 86400
@@ -559,3 +621,34 @@ struct BurnPoint: Identifiable {
     let series: String
     let percent: Double
 }
+
+/// Stretches where the 5h-session line rose faster than "normal" — normal being the pace that
+/// spends the whole 5h window over exactly 5h of wall-clock (burn rate 1.0 = 20 %/h). Slope is
+/// measured between consecutive samples; a drop in percent is a window reset, which breaks the
+/// segment (no band spans a reset). `samples` is expected chronological (the history store is
+/// append-only and keeps timestamps in place).
+func fastBurnBands(in samples: [UsageSample], ratePerHour: Double = 20) -> [(start: Date, end: Date)] {
+    var bands: [(start: Date, end: Date)] = []
+    for (a, b) in zip(samples, samples.dropFirst()) {
+        let dtHours = (b.t - a.t) / 3600
+        guard dtHours > 0 else { continue }
+        let delta = b.session - a.session
+        guard delta > 0 else { continue }           // reset or flat — not a band
+        if delta / dtHours > ratePerHour { bands.append((a.date, b.date)) }
+    }
+    return bands
+}
+
+#if DEBUG
+/// Sanity-checks the slope/reset logic on synthetic samples; called once at launch in DEBUG.
+func runFastBurnBandsSelfCheck() {
+    func s(_ minutes: Double, _ pct: Double) -> UsageSample {
+        UsageSample(t: minutes * 60, session: pct, weekly: nil, scoped: nil,
+                    scopedModel: nil, sonnet: nil, opus: nil)
+    }
+    // 0→5 % in 4 min = 75 %/h (fires); then 5→1 % is a reset, so exactly one band.
+    assert(fastBurnBands(in: [s(0, 0), s(4, 5), s(8, 1)]).count == 1)
+    // 1 % in 4 min = 15 %/h — below the 20 %/h normal, so no band.
+    assert(fastBurnBands(in: [s(0, 0), s(4, 1)]).isEmpty)
+}
+#endif
