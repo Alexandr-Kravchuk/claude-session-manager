@@ -20,6 +20,13 @@ struct StatisticsContent: View {
     private let workHourTint = Color.secondary
     private let overRateTint = Color.red
 
+    /// Ranges zoomed in enough for 5h-session detail to read: work-hour bands, the
+    /// over-rate highlight, and per-session ideal-pace lines. On 14d/30d a 5h window is a
+    /// few percent of the chart width, so those marks collapse into noise and are hidden.
+    private var isShortRange: Bool {
+        [.sixHours, .twelveHours, .oneDay, .sevenDays].contains(range)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -71,6 +78,12 @@ struct StatisticsContent: View {
     // MARK: - Usage
 
     private var usageTab: some View {
+        GeometryReader { geo in
+            usageTabContent(chartHeight: min(580, max(290, geo.size.height - 310)))
+        }
+    }
+
+    private func usageTabContent(chartHeight: CGFloat) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 currentUsageCards
@@ -92,7 +105,7 @@ struct StatisticsContent: View {
                     emptyState("Collecting history. The graph fills in while ClaudeBar runs.")
                 } else {
                     VStack(alignment: .leading, spacing: 12) {
-                        burnChart
+                        burnChart.frame(height: chartHeight)
                         chartLegend
                     }
                     HStack(spacing: 6) {
@@ -177,21 +190,25 @@ struct StatisticsContent: View {
                 .foregroundStyle(workHourTint.opacity(0.09))
             }
 
-            ForEach(overRateBands, id: \.start) { band in
-                RectangleMark(
-                    xStart: .value("Start", band.start),
-                    xEnd: .value("End", band.end),
-                    yStart: .value("Low", 0),
-                    yEnd: .value("High", 100)
-                )
-                .foregroundStyle(overRateTint.opacity(0.12))
-            }
-
             if range == .sevenDays {
                 ForEach(dayLabelTicks, id: \.self) { day in
                     RuleMark(x: .value("Day", day))
                         .foregroundStyle(Color.secondary.opacity(0.4))
                         .lineStyle(StrokeStyle(lineWidth: 1))
+                }
+            }
+
+            // Dashed "ideal pace" reference per window — the straight line from 0 % at the
+            // window's start to 100 % at its reset. Drawn dimmed and under the real series.
+            ForEach(Array(idealPaceLines.enumerated()), id: \.offset) { index, line in
+                ForEach([line.start, line.end], id: \.0) { point in
+                    LineMark(
+                        x: .value("Time", point.0),
+                        y: .value("Used %", point.1),
+                        series: .value("Window", "ideal-\(index)")
+                    )
+                    .foregroundStyle(color(forSeries: line.series).opacity(0.4))
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
                 }
             }
 
@@ -203,6 +220,21 @@ struct StatisticsContent: View {
                 )
                 .foregroundStyle(by: .value("Window", point.series))
                 .interpolationMethod(.linear)
+            }
+
+            // Thick red overlay on the Session (5h) line where it climbed faster than normal,
+            // drawn after the series lines so it sits on top. Each segment gets its own series
+            // id so contiguous segments don't get bridged across gaps.
+            ForEach(Array(overRateSegments.enumerated()), id: \.offset) { index, segment in
+                ForEach([segment.start, segment.end], id: \.date) { sample in
+                    LineMark(
+                        x: .value("Time", sample.date),
+                        y: .value("Used %", sample.session),
+                        series: .value("Window", "over-rate-\(index)")
+                    )
+                    .foregroundStyle(overRateTint)
+                    .lineStyle(StrokeStyle(lineWidth: 4, lineCap: .round))
+                }
             }
 
             ForEach(latestBurnPoints) { point in
@@ -262,7 +294,6 @@ struct StatisticsContent: View {
         }
         .chartLegend(.hidden)   // replaced by the unified custom legend below the chart
         .chartForegroundStyleScale(domain: seriesLegendOrder, range: seriesLegendOrder.map(color(forSeries:)))
-        .frame(height: 290)
     }
 
     /// One legend for everything the chart draws — line series and background bands — so every
@@ -279,7 +310,20 @@ struct StatisticsContent: View {
                 if !workHourBands.isEmpty {
                     legendItem(bandSwatch(workHourTint.opacity(0.18)), "Work hours (9:00–18:00)")
                 }
-                legendItem(bandSwatch(overRateTint.opacity(0.25)), "Faster than normal (>20 %/h)")
+                if isShortRange {
+                    legendItem(
+                        Capsule().fill(overRateTint).frame(width: 18, height: 4),
+                        "Faster than normal (>20 %/h)"
+                    )
+                }
+                legendItem(
+                    HStack(spacing: 2) {
+                        ForEach(0..<3, id: \.self) { _ in
+                            Capsule().fill(Color.secondary).frame(width: 4, height: 2)
+                        }
+                    },
+                    "Ideal pace (100 % at reset)"
+                )
             }
         }
     }
@@ -302,7 +346,7 @@ struct StatisticsContent: View {
     /// glance. Only the intraday ranges (6h/12h/1d) and 7d are zoomed in enough for day-by-day
     /// banding to mean anything.
     private var workHourBands: [(start: Date, end: Date)] {
-        guard [.sixHours, .twelveHours, .oneDay, .sevenDays].contains(range) else { return [] }
+        guard isShortRange else { return [] }
         let dates = filteredBurnSeries.map(\.date)
         guard let lo = dates.min(), let hi = dates.max() else { return [] }
         let calendar = Calendar.current
@@ -320,8 +364,56 @@ struct StatisticsContent: View {
         return bands
     }
 
-    /// Red bands over stretches where the 5h session line climbed faster than "normal".
-    private var overRateBands: [(start: Date, end: Date)] { fastBurnBands(in: filteredSamples) }
+    /// Stretches where the 5h session line climbed faster than "normal", highlighted on the
+    /// line itself. Hidden on 14d/30d, where any active climb exceeds the threshold and the
+    /// highlight would swallow the whole line.
+    private var overRateSegments: [(start: UsageSample, end: UsageSample)] {
+        isShortRange ? fastBurnSegments(in: filteredSamples) : []
+    }
+
+    /// "Ideal pace" segments for every quota window visible in the sampled history — one
+    /// straight line per window, 0 % at its start rising to 100 % at its reset. 5h session
+    /// windows open on activity, so their starts come from the recorded samples; 7d windows
+    /// reset on a fixed schedule, so past ones sit at exact multiples of the duration back
+    /// from the known reset. All segments are clipped to the sampled X-domain so a reset
+    /// hours or days away never stretches the chart into the future.
+    private var idealPaceLines: [(series: String, start: (Date, Double), end: (Date, Double))] {
+        let dates = filteredBurnSeries.map(\.date)
+        guard let lo = dates.min(), let hi = dates.max(), hi > lo else { return [] }
+        var lines: [(series: String, start: (Date, Double), end: (Date, Double))] = []
+
+        func append(_ series: String, windowStart: Date, duration: TimeInterval) {
+            let x0 = max(windowStart, lo)
+            let x1 = min(windowStart.addingTimeInterval(duration), hi)
+            guard x1 > x0 else { return }
+            func percent(_ d: Date) -> Double { d.timeIntervalSince(windowStart) / duration * 100 }
+            lines.append((series, (x0, percent(x0)), (x1, percent(x1))))
+        }
+
+        // Per-session ideal lines only where a 5h window is wide enough to read; on 14d/30d
+        // they would be dozens of near-vertical dashes across the whole chart.
+        if isShortRange {
+            let sessionDuration: TimeInterval = 5 * 3600
+            let sessionResets = snapshot?.session.resetsAt
+            for window in sessionWindows(in: filteredSamples, duration: sessionDuration, lastResetsAt: sessionResets) {
+                append("Session (5h)", windowStart: window.start, duration: sessionDuration)
+            }
+        }
+
+        func addPeriodic(_ series: String, _ window: RateWindow?) {
+            guard let window, let resetsAt = window.resetsAt, window.windowDuration > 0 else { return }
+            var end = resetsAt
+            while end > lo {
+                append(series, windowStart: end.addingTimeInterval(-window.windowDuration), duration: window.windowDuration)
+                end = end.addingTimeInterval(-window.windowDuration)
+            }
+        }
+        addPeriodic("Weekly", snapshot?.weekly)
+        if let scoped = snapshot?.scopedWeekly {
+            addPeriodic(snapshot?.scopedModelName.map { "\($0) (7d)" } ?? "Model (7d)", scoped)
+        }
+        return lines
+    }
 
     /// Ticks anchored at midnight and stepped by `xAxisStyle`, instead of Charts' automatic
     /// `.stride`, which anchors wherever the data happens to start — an arbitrary offset that
@@ -403,9 +495,24 @@ struct StatisticsContent: View {
         return order
     }
 
+    /// Samples inside the selected range, decimated on 14d/30d — at those widths one point
+    /// per ~4 min is thousands of marks Swift Charts visibly chokes on, while the curve's
+    /// shape survives a much coarser grid. Samples adjacent to a session reset (the drop and
+    /// the peak before it) and the latest sample are always kept so resets stay sharp.
     private var filteredSamples: [UsageSample] {
         let cutoff = Date().addingTimeInterval(-range.interval)
-        return samples.filter { $0.date >= cutoff }
+        let recent = samples.filter { $0.date >= cutoff }
+        guard let minGap = range.decimationGap else { return recent }
+        var kept: [UsageSample] = []
+        for (i, sample) in recent.enumerated() {
+            let isLast = i == recent.count - 1
+            let dropsNext = !isLast && recent[i + 1].session < sample.session
+            let droppedFromPrev = i > 0 && sample.session < recent[i - 1].session
+            if let last = kept.last, !isLast, !dropsNext, !droppedFromPrev,
+               sample.date.timeIntervalSince(last.date) < minGap { continue }
+            kept.append(sample)
+        }
+        return kept
     }
 
     private var filteredBurnSeries: [BurnPoint] {
@@ -426,7 +533,10 @@ struct StatisticsContent: View {
                 points.append(BurnPoint(date: sample.date, series: label, percent: scoped))
             }
         }
-        return points
+        // A series with a single in-range point can't draw a line — it would only add a
+        // stray legend entry and a lone dot (e.g. legacy "Sonnet (7d)" at the edge of 30d).
+        let counts = Dictionary(grouping: points, by: \.series).mapValues(\.count)
+        return points.filter { counts[$0.series, default: 0] >= 2 }
     }
 
     private var latestBurnPoints: [BurnPoint] {
@@ -613,6 +723,16 @@ private enum HistoryRange: String, CaseIterable, Identifiable {
         case .thirtyDays: return 30 * 86400
         }
     }
+
+    /// Minimum spacing between charted samples, nil = draw every sample. Only the two
+    /// widest ranges thin the data; see `filteredSamples` for the rationale.
+    var decimationGap: TimeInterval? {
+        switch self {
+        case .fourteenDays: return 15 * 60
+        case .thirtyDays: return 30 * 60
+        default: return nil
+        }
+    }
 }
 
 struct BurnPoint: Identifiable {
@@ -625,30 +745,81 @@ struct BurnPoint: Identifiable {
 /// Stretches where the 5h-session line rose faster than "normal" — normal being the pace that
 /// spends the whole 5h window over exactly 5h of wall-clock (burn rate 1.0 = 20 %/h). Slope is
 /// measured between consecutive samples; a drop in percent is a window reset, which breaks the
-/// segment (no band spans a reset). `samples` is expected chronological (the history store is
+/// segment (no segment spans a reset). `samples` is expected chronological (the history store is
 /// append-only and keeps timestamps in place).
-func fastBurnBands(in samples: [UsageSample], ratePerHour: Double = 20) -> [(start: Date, end: Date)] {
-    var bands: [(start: Date, end: Date)] = []
+func fastBurnSegments(in samples: [UsageSample], ratePerHour: Double = 20) -> [(start: UsageSample, end: UsageSample)] {
+    var segments: [(start: UsageSample, end: UsageSample)] = []
     for (a, b) in zip(samples, samples.dropFirst()) {
         let dtHours = (b.t - a.t) / 3600
         guard dtHours > 0 else { continue }
         let delta = b.session - a.session
-        guard delta > 0 else { continue }           // reset or flat — not a band
-        if delta / dtHours > ratePerHour { bands.append((a.date, b.date)) }
+        guard delta > 0 else { continue }           // reset or flat — not a segment
+        if delta / dtHours > ratePerHour { segments.append((a, b)) }
     }
-    return bands
+    return segments
+}
+
+/// Estimated span of every 5h session window visible in `samples`. A drop in the session
+/// percent is a reset — the precisely observable END of a window — so completed windows
+/// anchor there (midpoint of the two samples around the drop) and extend exactly `duration`
+/// back. The still-open window at the tail has no drop yet: its end is the API-reported
+/// `lastResetsAt` when available, otherwise its start is back-projected from the first
+/// sample where the percent begins to climb. Flat tail runs with no reset date yield nothing.
+func sessionWindows(
+    in samples: [UsageSample],
+    duration: TimeInterval = 5 * 3600,
+    lastResetsAt: Date? = nil
+) -> [(start: Date, end: Date)] {
+    var windows: [(start: Date, end: Date)] = []
+    var runStart = 0
+    for i in samples.indices {
+        let isTail = i == samples.count - 1
+        let drops = !isTail && samples[i + 1].session < samples[i].session
+        guard drops || isTail else { continue }
+        if drops {
+            let gap = samples[i + 1].date.timeIntervalSince(samples[i].date)
+            let reset = samples[i].date.addingTimeInterval(gap / 2)
+            windows.append((reset.addingTimeInterval(-duration), reset))
+            runStart = i + 1
+        } else if let reset = lastResetsAt {
+            windows.append((reset.addingTimeInterval(-duration), reset))
+        } else if let climb = (runStart..<i).first(where: { samples[$0 + 1].session > samples[$0].session }) {
+            let anchor = samples[climb]
+            let start = anchor.date.addingTimeInterval(-anchor.session / 100 * duration)
+            windows.append((start, start.addingTimeInterval(duration)))
+        }
+    }
+    return windows
 }
 
 #if DEBUG
 /// Sanity-checks the slope/reset logic on synthetic samples; called once at launch in DEBUG.
-func runFastBurnBandsSelfCheck() {
+func runFastBurnSegmentsSelfCheck() {
     func s(_ minutes: Double, _ pct: Double) -> UsageSample {
         UsageSample(t: minutes * 60, session: pct, weekly: nil, scoped: nil,
                     scopedModel: nil, sonnet: nil, opus: nil)
     }
-    // 0→5 % in 4 min = 75 %/h (fires); then 5→1 % is a reset, so exactly one band.
-    assert(fastBurnBands(in: [s(0, 0), s(4, 5), s(8, 1)]).count == 1)
-    // 1 % in 4 min = 15 %/h — below the 20 %/h normal, so no band.
-    assert(fastBurnBands(in: [s(0, 0), s(4, 1)]).isEmpty)
+    // 0→5 % in 4 min = 75 %/h (fires); then 5→1 % is a reset, so exactly one segment.
+    assert(fastBurnSegments(in: [s(0, 0), s(4, 5), s(8, 1)]).count == 1)
+    // 1 % in 4 min = 15 %/h — below the 20 %/h normal, so no segment.
+    assert(fastBurnSegments(in: [s(0, 0), s(4, 1)]).isEmpty)
+
+    // Reset at 5→1 (between minutes 4 and 8) ends a completed window anchored at the drop
+    // midpoint (minute 6); the tail run has no reset date and no climb, so nothing more.
+    let dur: TimeInterval = 300 * 60
+    let completed = sessionWindows(in: [s(0, 0), s(4, 5), s(8, 1)], duration: dur)
+    assert(completed.count == 1)
+    assert(completed[0].end == Date(timeIntervalSince1970: 6 * 60))
+    assert(completed[0].start == completed[0].end.addingTimeInterval(-dur))
+    // With the API reset known, the open tail window anchors exactly there.
+    let reset = Date(timeIntervalSince1970: 200 * 60)
+    let open = sessionWindows(in: [s(0, 0), s(4, 5)], duration: dur, lastResetsAt: reset)
+    assert(open.count == 1 && open[0].end == reset)
+    // No reset date: the tail back-projects 1 % → 3 min before the climb sample.
+    let projected = sessionWindows(in: [s(0, 1), s(4, 5)], duration: dur)
+    assert(projected.count == 1)
+    assert(projected[0].start == Date(timeIntervalSince1970: -3 * 60))
+    // Flat run, no reset date — no window.
+    assert(sessionWindows(in: [s(0, 3), s(4, 3)]).isEmpty)
 }
 #endif

@@ -7,7 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // while still letting the Statistics window open and take focus when requested.
         NSApp.setActivationPolicy(.accessory)
         #if DEBUG
-        runFastBurnBandsSelfCheck()
+        runFastBurnSegmentsSelfCheck()
         #endif
     }
 }
