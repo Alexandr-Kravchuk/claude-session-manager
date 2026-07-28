@@ -67,7 +67,11 @@ struct StatisticsContent: View {
 
     private var usageTab: some View {
         GeometryReader { geo in
-            usageTabContent(chartHeight: min(580, max(290, geo.size.height - 310)))
+            // The subtracted slab covers everything the chart shares the tab with: cards, section
+            // header, scrubber, the three legend rows, the forecast summary and the footnote.
+            // Understate it and the summary and footnote fall below the fold — which is exactly
+            // where they must not be, being the written form of the projection.
+            usageTabContent(chartHeight: min(580, max(290, geo.size.height - 430)))
         }
     }
 
@@ -100,7 +104,7 @@ struct StatisticsContent: View {
                     )
                     HStack(spacing: 6) {
                         Image(systemName: "info.circle")
-                        Text("Lines show percent used; drops to zero are quota-window resets; dots are the latest recorded values.")
+                        Text("Lines show percent used; drops to zero are quota-window resets; dots are the latest recorded values. Scroll right past “now” for the projected run-out.")
                     }
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
@@ -365,32 +369,87 @@ private struct BurnChartView: View {
     private var dataStart: Date { samples.first?.date ?? Date() }
     private var dataEnd: Date { samples.last?.date ?? Date() }
 
-    /// The newest window's left edge — showing the most recent `range.interval` of history.
-    private var latestStart: Date { dataEnd.addingTimeInterval(-range.interval) }
+    /// "Now": the boundary between recorded history and projection, and the anchor every
+    /// forecast line starts from. The later of the last recorded sample and the live snapshot's
+    /// fetch time, so the dashed projections begin where the solid lines stop rather than a
+    /// step behind them.
+    private var nowAnchor: Date { max(dataEnd, snapshot?.fetchedAt ?? dataEnd) }
 
-    /// Only offer scrolling when there is more history than a single window can show.
-    private var canScroll: Bool { dataEnd.timeIntervalSince(dataStart) > range.interval }
-
-    /// Keep the window from running past either end of the recorded history.
-    private func clamp(_ start: Date) -> Date { min(max(start, dataStart), latestStart) }
-
-    private var effectiveStart: Date { canScroll ? clamp(windowStart ?? latestStart) : dataStart }
-
-    // Visible X-domain. When there is nothing to scroll, fit the data (the pre-scroll behavior).
-    private var domainStart: Date { effectiveStart }
-    private var domainEnd: Date {
-        canScroll ? effectiveStart.addingTimeInterval(range.interval) : dataEnd
+    /// Right end of the scrollable timeline: the last reset any live forecast reaches, plus a
+    /// sliver of padding so the final marks don't sit flush against the edge. Nothing past it
+    /// is worth reaching — beyond the final reset there is neither a forecast nor an ideal-pace
+    /// line left to draw (`periodicWindowStarts` walks backwards from the reset).
+    private var timelineEnd: Date {
+        guard let furthest = chartForecasts.map(\.resetsAt).max() else { return nowAnchor }
+        return max(nowAnchor, furthest.addingTimeInterval(range.interval * 0.05))
     }
+
+    /// The window the chart opens on: latest readings flush against the right edge. Scrolling
+    /// right from here walks into the forecast.
+    private var defaultStart: Date { nowAnchor.addingTimeInterval(-range.interval) }
+
+    /// Scroll bounds. The lower one dips below `dataStart` when history is shorter than the
+    /// selected range, so the window keeps its full width (and therefore its scale) instead of
+    /// squeezing to fit whatever has been recorded so far.
+    private var scrollMin: Date { min(dataStart, defaultStart) }
+    private var scrollMax: Date { max(defaultStart, timelineEnd.addingTimeInterval(-range.interval)) }
+
+    /// Only offer the scrubber when the window can actually move — and never hand `Slider(in:)`
+    /// an empty range, which traps.
+    private var canScroll: Bool { scrollMax > scrollMin }
+
+    private func clamp(_ start: Date) -> Date { min(max(start, scrollMin), scrollMax) }
+
+    private var effectiveStart: Date { clamp(windowStart ?? defaultStart) }
+
+    // Visible X-domain: always exactly `range.interval` wide, so the scale is preserved wherever
+    // the window sits — over history, over the forecast, or straddling both.
+    private var domainStart: Date { effectiveStart }
+    private var domainEnd: Date { effectiveStart.addingTimeInterval(range.interval) }
 
     /// Samples inside the visible window, plus a small buffer each side so lines reach the edges
     /// instead of stopping at the last in-window point. Cheap: a date filter over the decimated
-    /// set, the only per-scroll work of consequence.
+    /// set, the only per-scroll work of consequence. Empty once scrolled past `nowAnchor` — out
+    /// there the forecast lines are all there is.
     private var visibleSamples: [UsageSample] {
-        guard canScroll else { return samples }
         let buffer = range.interval * 0.05
         let lo = domainStart.addingTimeInterval(-buffer)
         let hi = domainEnd.addingTimeInterval(buffer)
         return samples.filter { $0.date >= lo && $0.date <= hi }
+    }
+
+    /// Projected continuations for the two shared limits, in legend order. Built from the live
+    /// snapshot's own pace figures rather than a second derivation of the burn rate, so the chart
+    /// can never quote a different forecast than the menu does. The per-model scoped window is
+    /// left out for the same reason it has no ideal-pace line: it tracks the weekly closely, and
+    /// a third dashed pair would only crowd the chart.
+    private var forecasts: [BurnForecast] {
+        guard let snapshot else { return [] }
+        let anchor = nowAnchor
+        return [
+            burnForecast(series: "Session (5h)", window: snapshot.session, kind: .session, now: anchor),
+            snapshot.weekly.flatMap { burnForecast(series: "Weekly", window: $0, kind: .weekly, now: anchor) }
+        ].compactMap { $0 }
+    }
+
+    /// The forecasts the chart actually draws. On 14d/30d a 5-hour window is a fraction of a
+    /// percent of the chart's width: the session projection collapses to a vertical tick and its
+    /// label spills off the plot onto the axis — the same reason `isShortRange` withholds the
+    /// ideal-pace and over-rate marks there. The weekly projection spans days, so it stays.
+    /// The written summary below the chart still reports both, where width costs nothing.
+    private var chartForecasts: [BurnForecast] {
+        isShortRange ? forecasts : forecasts.filter { $0.series != "Session (5h)" }
+    }
+
+    /// Window position that brings the projected finish line into view — centred on the first
+    /// run-out the chart draws, or on the furthest reset when nothing runs out. nil when there is
+    /// nothing to jump to, or when it is already on screen in the default view.
+    private var forecastFocusStart: Date? {
+        guard canScroll, !chartForecasts.isEmpty else { return nil }
+        let target = chartForecasts.compactMap(\.exhaustsAt).min() ?? chartForecasts.map(\.resetsAt).max()
+        guard let target, target > nowAnchor else { return nil }
+        let centred = clamp(target.addingTimeInterval(-range.interval / 2))
+        return centred > clamp(defaultStart) ? centred : nil
     }
 
     var body: some View {
@@ -398,13 +457,15 @@ private struct BurnChartView: View {
             burnChart.frame(height: chartHeight)
             if canScroll { scrubber }
             chartLegend
+            forecastSummary
         }
         // A new range means a new zoom and a fresh set of samples — snap back to the latest
         // window so the chart always opens on "now" rather than a stale scrolled-away position.
         .onChange(of: range) { _ in windowStart = nil }
     }
 
-    /// The visible time span, shown next to the scrubber so it's clear which slice is on screen.
+    /// The visible time span, shown next to the scrubber so it's clear which slice is on screen —
+    /// including the stretch to the right of "now", where only the forecast lives.
     private var scrubber: some View {
         HStack(spacing: 12) {
             Slider(
@@ -412,91 +473,64 @@ private struct BurnChartView: View {
                     get: { effectiveStart.timeIntervalSince1970 },
                     set: { windowStart = clamp(Date(timeIntervalSince1970: $0)) }
                 ),
-                in: dataStart.timeIntervalSince1970 ... latestStart.timeIntervalSince1970
+                in: scrollMin.timeIntervalSince1970 ... scrollMax.timeIntervalSince1970
             )
-            Text("\(domainStart, format: .dateTime.month(.abbreviated).day()) – \(domainEnd, format: .dateTime.month(.abbreviated).day())")
+            Text(windowLabel)
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .monospacedDigit()
-                .frame(width: 120, alignment: .leading)
+                .frame(width: 176, alignment: .leading)
             Button {
                 windowStart = nil
             } label: {
-                Image(systemName: "forward.end.alt.fill")
+                Image(systemName: "clock.arrow.circlepath")
             }
             .buttonStyle(.borderless)
-            .disabled(effectiveStart >= latestStart)
-            .help("Jump to the latest")
+            .disabled(effectiveStart == clamp(defaultStart))
+            .help("Back to the latest readings")
+
+            // Without this the feature is unusable on the short ranges: at 6h the weekly run-out
+            // can sit dozens of window-widths to the right.
+            Button {
+                if let start = forecastFocusStart { windowStart = start }
+            } label: {
+                Image(systemName: "flag.checkered")
+            }
+            .buttonStyle(.borderless)
+            .disabled(forecastFocusStart == nil)
+            .help("Scroll ahead to the projected finish line")
         }
     }
 
+    /// Visible span, with the time included on ranges of a day or less — scrolled into the
+    /// forecast, a bare "Jul 28 – Jul 28" says nothing about where you are.
+    private var windowLabel: String {
+        let dayMonth: Date.FormatStyle = .dateTime.month(.abbreviated).day()
+        guard range.interval <= 86400 else {
+            return "\(domainStart.formatted(dayMonth)) – \(domainEnd.formatted(dayMonth))"
+        }
+        let stamped: Date.FormatStyle = .dateTime.month(.abbreviated).day().hour().minute()
+        let sameDay = Calendar.current.isDate(domainStart, inSameDayAs: domainEnd)
+        let end = sameDay
+            ? domainEnd.formatted(.dateTime.hour().minute())
+            : domainEnd.formatted(stamped)
+        return "\(domainStart.formatted(stamped)) – \(end)"
+    }
+
+    /// Split into one `@ChartContentBuilder` group per layer, bottom to top. Not organisational
+    /// taste: as a single literal body this exceeded what the type-checker will solve, and Charts
+    /// reports that as a hard "unable to type-check in reasonable time" error.
     private var burnChart: some View {
         Chart {
-            ForEach(workHourBands, id: \.start) { band in
-                RectangleMark(
-                    xStart: .value("Start", band.start),
-                    xEnd: .value("End", band.end),
-                    yStart: .value("Low", 0),
-                    yEnd: .value("High", 100)
-                )
-                .foregroundStyle(workHourTint.opacity(0.09))
-            }
-
-            if range == .sevenDays {
-                ForEach(dayLabelTicks, id: \.self) { day in
-                    RuleMark(x: .value("Day", day))
-                        .foregroundStyle(Color.secondary.opacity(0.4))
-                        .lineStyle(StrokeStyle(lineWidth: 1))
-                }
-            }
-
-            // Dashed "ideal pace" reference per window — rising from 0 % at the window's start
-            // to 100 % at its reset (the 7d lines run flat over weekends). Under the real series.
-            ForEach(Array(idealPaceLines.enumerated()), id: \.offset) { index, line in
-                ForEach(line.points, id: \.0) { point in
-                    LineMark(
-                        x: .value("Time", point.0),
-                        y: .value("Used %", point.1),
-                        series: .value("Window", "ideal-\(index)")
-                    )
-                    .foregroundStyle(color(forSeries: line.series).opacity(0.4))
-                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
-                }
-            }
-
-            ForEach(visibleBurnSeries) { point in
-                LineMark(
-                    x: .value("Time", point.date),
-                    y: .value("Used %", point.percent),
-                    series: .value("Window", point.series)
-                )
-                .foregroundStyle(by: .value("Window", point.series))
-                .interpolationMethod(.linear)
-            }
-
-            // Thick red overlay on the Session (5h) line where it climbed faster than normal,
-            // drawn after the series lines so it sits on top. Each segment gets its own series
-            // id so contiguous segments don't get bridged across gaps.
-            ForEach(Array(overRateSegments.enumerated()), id: \.offset) { index, segment in
-                ForEach([segment.start, segment.end], id: \.date) { sample in
-                    LineMark(
-                        x: .value("Time", sample.date),
-                        y: .value("Used %", sample.session),
-                        series: .value("Window", "over-rate-\(index)")
-                    )
-                    .foregroundStyle(overRateTint)
-                    .lineStyle(StrokeStyle(lineWidth: 4, lineCap: .round))
-                }
-            }
-
-            ForEach(latestBurnPoints) { point in
-                PointMark(
-                    x: .value("Time", point.date),
-                    y: .value("Used %", point.percent)
-                )
-                .foregroundStyle(by: .value("Window", point.series))
-                .symbolSize(42)
-            }
+            workHourBandMarks
+            dayDividerMarks
+            idealPaceMarks
+            seriesMarks
+            overRateMarks
+            latestPointMarks
+            forecastMarks
+            finishLineMarks
+            nowDividerMark
         }
         .chartYScale(domain: 0...100)
         .chartXScale(domain: domainStart ... domainEnd)
@@ -549,6 +583,149 @@ private struct BurnChartView: View {
         .chartForegroundStyleScale(domain: seriesLegendOrder, range: seriesLegendOrder.map(color(forSeries:)))
     }
 
+    @ChartContentBuilder
+    private var workHourBandMarks: some ChartContent {
+        ForEach(workHourBands, id: \.start) { band in
+            RectangleMark(
+                xStart: .value("Start", band.start),
+                xEnd: .value("End", band.end),
+                yStart: .value("Low", 0),
+                yEnd: .value("High", 100)
+            )
+            .foregroundStyle(workHourTint.opacity(0.09))
+        }
+    }
+
+    @ChartContentBuilder
+    private var dayDividerMarks: some ChartContent {
+        ForEach(range == .sevenDays ? dayLabelTicks : [], id: \.self) { day in
+            RuleMark(x: .value("Day", day))
+                .foregroundStyle(Color.secondary.opacity(0.4))
+                .lineStyle(StrokeStyle(lineWidth: 1))
+        }
+    }
+
+    /// Dashed "ideal pace" reference per window — rising from 0 % at the window's start to 100 %
+    /// at its reset (the 7d lines run flat over weekends). Under the real series.
+    @ChartContentBuilder
+    private var idealPaceMarks: some ChartContent {
+        ForEach(Array(idealPaceLines.enumerated()), id: \.offset) { index, line in
+            ForEach(line.points, id: \.0) { point in
+                LineMark(
+                    x: .value("Time", point.0),
+                    y: .value("Used %", point.1),
+                    series: .value("Window", "ideal-\(index)")
+                )
+                .foregroundStyle(color(forSeries: line.series).opacity(0.4))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private var seriesMarks: some ChartContent {
+        ForEach(visibleBurnSeries) { point in
+            LineMark(
+                x: .value("Time", point.date),
+                y: .value("Used %", point.percent),
+                series: .value("Window", point.series)
+            )
+            .foregroundStyle(by: .value("Window", point.series))
+            .interpolationMethod(.linear)
+        }
+    }
+
+    /// Thick red overlay on the Session (5h) line where it climbed faster than normal, drawn after
+    /// the series lines so it sits on top. Each segment gets its own series id so contiguous
+    /// segments don't get bridged across gaps.
+    @ChartContentBuilder
+    private var overRateMarks: some ChartContent {
+        ForEach(Array(overRateSegments.enumerated()), id: \.offset) { index, segment in
+            ForEach([segment.start, segment.end], id: \.date) { sample in
+                LineMark(
+                    x: .value("Time", sample.date),
+                    y: .value("Used %", sample.session),
+                    series: .value("Window", "over-rate-\(index)")
+                )
+                .foregroundStyle(overRateTint)
+                .lineStyle(StrokeStyle(lineWidth: 4, lineCap: .round))
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private var latestPointMarks: some ChartContent {
+        ForEach(latestBurnPoints) { point in
+            PointMark(
+                x: .value("Time", point.date),
+                y: .value("Used %", point.percent)
+            )
+            .foregroundStyle(by: .value("Window", point.series))
+            .symbolSize(42)
+        }
+    }
+
+    /// Where each live window is headed from "now" on, at the pace measured so far. Thicker and far
+    /// more opaque than the ideal-pace dashes, and on a longer dash, so the two never read as the
+    /// same line where they overlap to the right of "now".
+    @ChartContentBuilder
+    private var forecastMarks: some ChartContent {
+        ForEach(chartForecasts) { forecast in
+            ForEach(forecast.points, id: \.0) { point in
+                LineMark(
+                    x: .value("Time", point.0),
+                    y: .value("Used %", point.1),
+                    series: .value("Window", "forecast-\(forecast.series)")
+                )
+                .foregroundStyle(color(forSeries: forecast.series).opacity(0.85))
+                .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: [8, 4]))
+            }
+        }
+    }
+
+    /// The finish line itself: a vertical rule where a window is projected to hit 100 %, with the
+    /// clock time called out at the crossing.
+    @ChartContentBuilder
+    private var finishLineMarks: some ChartContent {
+        ForEach(Array(chartForecasts.filter { $0.exhaustsAt != nil }.enumerated()), id: \.element.id) { index, forecast in
+            let runOut = forecast.exhaustsAt ?? nowAnchor
+            RuleMark(x: .value("Runs out", runOut))
+                .foregroundStyle(color(forSeries: forecast.series).opacity(0.55))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [3, 4]))
+            PointMark(x: .value("Runs out", runOut), y: .value("Used %", 100))
+                .foregroundStyle(color(forSeries: forecast.series))
+                .symbol(.diamond)
+                .symbolSize(58)
+                // Each finish line's label sits a row lower than the last, so two windows that
+                // run out at nearly the same time don't print over each other.
+                .annotation(position: .bottomTrailing, spacing: 6 + CGFloat(index) * 18) {
+                    // Down-and-right of the 100 % crossing: down keeps the label inside the plot
+                    // (the macOS 14 overflow-resolution API is off-limits at this deployment
+                    // target), and right keeps it off the climbing line, which approaches from
+                    // the left. Past the crossing the forecast runs flat along 100 %, well above.
+                    Text("\(forecast.shortName) out \(runOut, format: .dateTime.hour().minute())")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(color(forSeries: forecast.series))
+                }
+        }
+    }
+
+    /// Boundary between what was recorded and what is merely projected. Load-bearing: without it a
+    /// dashed line sitting at 100 % reads as history.
+    @ChartContentBuilder
+    private var nowDividerMark: some ChartContent {
+        RuleMark(x: .value("Now", nowAnchor))
+            .foregroundStyle(Color.secondary.opacity(0.55))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+            .annotation(position: .top, spacing: 2) {
+                // Labeled, because unlabeled it is indistinguishable from a gridline — and a
+                // gridline carries none of the "everything right of here is a guess" meaning.
+                Text("now")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+    }
+
     /// One legend for everything the chart draws — line series and background bands — so every
     /// color is spelled out in a single place under the chart. Band swatches only appear when
     /// that band can be drawn for the current range.
@@ -576,7 +753,73 @@ private struct BurnChartView: View {
                     "Ideal pace (100 % at reset)"
                 )
             }
+            if !chartForecasts.isEmpty {
+                HStack(spacing: 16) {
+                    legendItem(
+                        HStack(spacing: 3) {
+                            ForEach(0..<2, id: \.self) { _ in
+                                Capsule().fill(Color.secondary).frame(width: 8, height: 2.5)
+                            }
+                        },
+                        "Forecast at the current pace — scroll right"
+                    )
+                    legendItem(
+                        Rectangle().fill(Color.secondary).frame(width: 1.5, height: 11),
+                        "Projected run-out (◆ = hits 100 %)"
+                    )
+                }
+            }
         }
+    }
+
+    /// The projection in plain text, so the forecast is readable without scrolling to it — and so
+    /// the run-out time on the chart has a written figure to be checked against.
+    @ViewBuilder
+    private var forecastSummary: some View {
+        if !forecasts.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(forecasts) { forecast in
+                    HStack(spacing: 6) {
+                        Image(systemName: forecastSymbol(forecast))
+                            .font(.system(size: 10))
+                            .foregroundColor(color(forSeries: forecast.series))
+                            .frame(width: 12)
+                        Text(forecastLine(forecast))
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func forecastSymbol(_ forecast: BurnForecast) -> String {
+        if !forecast.paceKnown { return "minus.circle" }
+        return forecast.exhaustsAt == nil ? "checkmark.circle" : "flame.fill"
+    }
+
+    private func forecastLine(_ forecast: BurnForecast) -> String {
+        // Matches the menu's "Early" chip: no pace worth trusting yet, so claim nothing beyond
+        // where the window resets.
+        guard forecast.paceKnown else {
+            return "\(forecast.series): too early to project a run-out — resets \(stamp(forecast.resetsAt))."
+        }
+        guard let runOut = forecast.exhaustsAt else {
+            return "\(forecast.series): lands at \(Int(forecast.percentAtReset.rounded()))% by \(stamp(forecast.resetsAt)) — won't run out."
+        }
+        guard let inTime = forecast.timeToExhaust, inTime > 0 else {
+            return "\(forecast.series): exhausted — refills \(stamp(forecast.resetsAt))."
+        }
+        let early = forecast.resetsAt.timeIntervalSince(runOut)
+        return "\(forecast.series): runs out \(stamp(runOut)) — in \(formatDuration(inTime)), \(formatDuration(early)) before its reset."
+    }
+
+    /// Clock time for anything inside the next day, date and time beyond it — a weekly reset five
+    /// days out needs the day, a session run-out in 40 minutes does not.
+    private func stamp(_ date: Date) -> String {
+        Calendar.current.isDateInToday(date)
+            ? date.formatted(.dateTime.hour().minute())
+            : date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
     }
 
     private func legendItem(_ swatch: some View, _ label: String) -> some View {
@@ -658,7 +901,14 @@ private struct BurnChartView: View {
         if isShortRange {
             let sessionDuration: TimeInterval = 5 * 3600
             let sessionResets = snapshot?.session.resetsAt
-            for window in sessionWindows(in: visibleSamples, duration: sessionDuration, lastResetsAt: sessionResets) {
+            var windows = sessionWindows(in: visibleSamples, duration: sessionDuration, lastResetsAt: sessionResets)
+            // Scrolled into the forecast there are no samples left, so the call above yields
+            // nothing — yet the open window's ideal pace is exactly what the projection is meant
+            // to be compared against out there. Take it straight from the known reset.
+            if let reset = sessionResets, !windows.contains(where: { $0.end == reset }) {
+                windows.append((reset.addingTimeInterval(-sessionDuration), reset))
+            }
+            for window in windows {
                 addLinear("Session (5h)", windowStart: window.start, duration: sessionDuration)
             }
         }
@@ -794,12 +1044,11 @@ private struct BurnChartView: View {
         return points.filter { counts[$0.series, default: 0] >= 2 }
     }
 
-    /// Dots at the most recent recorded value per series. Only computed when the window is at
-    /// the latest slice — elsewhere the true-latest point is off-screen and the domain would
-    /// clip it anyway, so there is nothing to draw.
+    /// Dots at the most recent recorded value per series. Only computed while that reading is
+    /// inside the visible window — scrolled away from it, into history or into the forecast, the
+    /// domain would clip these anyway, so there is nothing to draw.
     private var latestBurnPoints: [BurnPoint] {
-        guard !canScroll || effectiveStart >= latestStart else { return [] }
-        guard let last = samples.last else { return [] }
+        guard let last = samples.last, last.date >= domainStart, last.date <= domainEnd else { return [] }
         var points = [BurnPoint(date: last.date, series: "Session (5h)", percent: last.session)]
         if let weekly = last.weekly {
             points.append(BurnPoint(date: last.date, series: "Weekly", percent: weekly))
@@ -863,6 +1112,95 @@ struct BurnPoint: Identifiable {
     let date: Date
     let series: String
     let percent: Double
+}
+
+/// Where one quota window is headed, as a polyline the chart can draw to the right of "now".
+/// `points` are unlabeled `(Date, Double)` pairs to match `idealPaceLines`, which Charts' `ForEach`
+/// keys by `\.0`.
+struct BurnForecast: Identifiable {
+    let series: String
+    let points: [(Date, Double)]
+    /// When the line reaches 100 % — the projected finish line. nil when the window is projected
+    /// to survive all the way to its reset.
+    let exhaustsAt: Date?
+    let resetsAt: Date
+    let percentAtReset: Double
+    /// Time from the anchor to exhaustion, so captions can quote the same figure the menu does.
+    let timeToExhaust: TimeInterval?
+    /// False when there is no trustworthy pace to extrapolate from — either the window is minutes
+    /// old, or its tier is still `.early`. The line is then flat at the current level and marks
+    /// only where the reset falls, so captions must not present it as a projection.
+    let paceKnown: Bool
+
+    var id: String { series }
+
+    /// Short label for on-chart annotations, where "Session (5h)" is more than fits.
+    var shortName: String { series.split(separator: " ").first.map(String.init) ?? series }
+}
+
+/// Build a forecast straight off a live `RateWindow`, reusing its own pace figures rather than
+/// re-deriving them — that way the chart's run-out time and the menu's "exhausts in …" are the
+/// same number by construction, not by coincidence.
+///
+/// The same applies to *withholding* a forecast: while `paceTier` is `.early` the whole-window
+/// average is noise on a tiny denominator, and `Recommender` deliberately makes no exhaustion
+/// claim. Minutes into a window the burn rate is already non-nil, so without this gate the chart
+/// would plant a confident finish line at the exact moment the menu shows an "Early" chip and says
+/// nothing — a contradiction that would appear at the start of every single session.
+func burnForecast(series: String, window: RateWindow, kind: WindowKind, now: Date) -> BurnForecast? {
+    guard let resetsAt = window.resetsAt else { return nil }
+    let trusted = window.paceTier(kind: kind) != .early
+    return burnForecastShape(
+        series: series,
+        usedPercent: window.usedPercent,
+        timeToExhaustion: trusted ? window.timeToExhaustion : nil,
+        projectedUsageAtReset: trusted ? window.projectedUsageAtReset : nil,
+        resetsAt: resetsAt,
+        now: now
+    )
+}
+
+/// Shape of a projected line: from the last measurement forward, climbing at the pace implied by
+/// `timeToExhaustion` until it hits 100 %, then flat along 100 % up to the reset — which is what
+/// actually happens, since a spent quota stays spent until it refills. A window projected to
+/// survive simply ends at its reset at `projectedUsageAtReset`, with no finish line. With no
+/// measurable rate yet the line is flat at the current level: still worth drawing, because it
+/// marks where the reset falls. Returns nil when the reset is already behind `now` (a stale
+/// snapshot) — there is nothing left to project.
+func burnForecastShape(
+    series: String,
+    usedPercent: Double,
+    timeToExhaustion: TimeInterval?,
+    projectedUsageAtReset: Double?,
+    resetsAt: Date,
+    now: Date
+) -> BurnForecast? {
+    guard resetsAt > now else { return nil }
+    let used = min(100, max(0, usedPercent))
+
+    // Already spent: a measured fact, not a forecast, so the finish line is behind us not ahead.
+    if used >= 100 {
+        return BurnForecast(series: series, points: [(now, 100), (resetsAt, 100)],
+                            exhaustsAt: now, resetsAt: resetsAt, percentAtReset: 100,
+                            timeToExhaust: 0, paceKnown: true)
+    }
+
+    if let remaining = timeToExhaustion, remaining >= 0 {
+        let exhaustsAt = now.addingTimeInterval(remaining)
+        if exhaustsAt <= resetsAt {
+            var points: [(Date, Double)] = [(now, used), (exhaustsAt, 100)]
+            if exhaustsAt < resetsAt { points.append((resetsAt, 100)) }
+            return BurnForecast(series: series, points: points, exhaustsAt: exhaustsAt,
+                                resetsAt: resetsAt, percentAtReset: 100,
+                                timeToExhaust: remaining, paceKnown: true)
+        }
+    }
+
+    let atReset = min(100, max(used, projectedUsageAtReset ?? used))
+    return BurnForecast(series: series, points: [(now, used), (resetsAt, atReset)],
+                        exhaustsAt: nil, resetsAt: resetsAt, percentAtReset: atReset,
+                        timeToExhaust: nil,
+                        paceKnown: timeToExhaustion != nil || projectedUsageAtReset != nil)
 }
 
 /// Stretches where the 5h-session line rose faster than "normal" — normal being the pace that
@@ -1037,5 +1375,72 @@ func runFastBurnSegmentsSelfCheck() {
     let starts = periodicWindowStarts(resetsAt: wReset, duration: wDur, visibleFrom: from, visibleTo: to)
     assert(!starts.isEmpty)
     assert(starts.allSatisfy { $0 < to && $0.addingTimeInterval(wDur) > from })   // each overlaps the range
+
+    // Forecast shapes — the lines you scroll right to see.
+    let fNow = Date(timeIntervalSince1970: 1_700_000_000)
+    let fReset = fNow.addingTimeInterval(4 * 3600)
+    // Projected to run out: rises to 100 % at the run-out instant, then flat to the reset.
+    let runsOut = burnForecastShape(series: "Session (5h)", usedPercent: 50,
+                                    timeToExhaustion: 3600, projectedUsageAtReset: 150,
+                                    resetsAt: fReset, now: fNow)!
+    assert(runsOut.exhaustsAt == fNow.addingTimeInterval(3600))
+    assert(runsOut.timeToExhaust == 3600)
+    assert(runsOut.points.count == 3)
+    assert(runsOut.points[0].1 == 50 && runsOut.points[1].1 == 100 && runsOut.points[2].1 == 100)
+    assert(runsOut.points[2].0 == fReset)
+    assert(runsOut.shortName == "Session")
+    // Survives the window: one segment ending at the reset, no finish line.
+    let survives = burnForecastShape(series: "Weekly", usedPercent: 40,
+                                     timeToExhaustion: 40 * 3600, projectedUsageAtReset: 62,
+                                     resetsAt: fReset, now: fNow)!
+    assert(survives.exhaustsAt == nil && survives.timeToExhaust == nil)
+    assert(survives.points.count == 2 && abs(survives.points[1].1 - 62) < 1e-9)
+    // Exhaustion landing exactly on the reset is not a flat tail — just the two points.
+    let exact = burnForecastShape(series: "Weekly", usedPercent: 40, timeToExhaustion: 4 * 3600,
+                                  projectedUsageAtReset: 100, resetsAt: fReset, now: fNow)!
+    assert(exact.exhaustsAt == fReset && exact.points.count == 2)
+    // Already spent: flat at 100 %, and the finish line is now rather than a future instant.
+    let spent = burnForecastShape(series: "Weekly", usedPercent: 100, timeToExhaustion: 0,
+                                  projectedUsageAtReset: 100, resetsAt: fReset, now: fNow)!
+    assert(spent.exhaustsAt == fNow && spent.points.allSatisfy { $0.1 == 100 })
+    // No measurable rate yet — flat at the current level, still marking where the reset falls.
+    let flat = burnForecastShape(series: "Session (5h)", usedPercent: 12, timeToExhaustion: nil,
+                                 projectedUsageAtReset: nil, resetsAt: fReset, now: fNow)!
+    assert(flat.exhaustsAt == nil && !flat.paceKnown)
+    assert(flat.points.count == 2 && flat.points[0].1 == 12 && flat.points[1].1 == 12)
+    assert(runsOut.paceKnown && survives.paceKnown && spent.paceKnown)
+    // A reset already behind us is a stale snapshot — nothing to project.
+    assert(burnForecastShape(series: "Weekly", usedPercent: 10, timeToExhaustion: 3600,
+                             projectedUsageAtReset: 20,
+                             resetsAt: fNow.addingTimeInterval(-60), now: fNow) == nil)
+    // The early-warmup gate. Minutes into a 5h window a burn rate already exists, but the menu
+    // withholds every exhaustion claim while the tier is `.early` — so the chart must withhold its
+    // finish line too. This is the state at the start of every single session.
+    let fresh = RateWindow(usedPercent: 8, windowDuration: 5 * 3600,
+                           resetsAt: Date().addingTimeInterval(4 * 3600 + 50 * 60))  // ~10m elapsed
+    assert(fresh.paceTier(kind: .session) == .early)
+    assert(fresh.timeToExhaustion != nil)   // a rate exists — the tier gate is what withholds, not nil-ness
+    let freshForecast = burnForecast(series: "Session (5h)", window: fresh, kind: .session, now: Date())!
+    assert(freshForecast.exhaustsAt == nil && !freshForecast.paceKnown)
+    // Past the gate the same window does get a finish line.
+    let mature = RateWindow(usedPercent: 90, windowDuration: 5 * 3600,
+                            resetsAt: Date().addingTimeInterval(3600))               // 4h elapsed
+    assert(mature.paceTier(kind: .session) != .early)
+    let matureForecast = burnForecast(series: "Session (5h)", window: mature, kind: .session, now: Date())!
+    assert(matureForecast.paceKnown && matureForecast.exhaustsAt != nil)
+
+    // Wired to a live RateWindow, the forecast stays inside that window: it never projects past
+    // the window's own reset, and the line never falls. Asserted as invariants rather than exact
+    // figures — `RateWindow`'s pace properties read the wall clock, so two reads of the same
+    // property differ by microseconds and an equality check on them would flake.
+    let live = RateWindow(usedPercent: 60, windowDuration: 5 * 3600,
+                          resetsAt: Date().addingTimeInterval(2 * 3600))
+    let liveReset = live.resetsAt!
+    let liveForecast = burnForecast(series: "Session (5h)", window: live, kind: .session, now: Date())!
+    assert(liveForecast.resetsAt == liveReset)
+    assert(liveForecast.points.allSatisfy { $0.0 <= liveReset })
+    assert((liveForecast.exhaustsAt ?? liveReset) <= liveReset)
+    assert(liveForecast.points.count >= 2)
+    assert(zip(liveForecast.points, liveForecast.points.dropFirst()).allSatisfy { $0.1 <= $1.1 + 1e-9 })
 }
 #endif
