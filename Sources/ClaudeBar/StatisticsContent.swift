@@ -104,7 +104,7 @@ struct StatisticsContent: View {
                     )
                     HStack(spacing: 6) {
                         Image(systemName: "info.circle")
-                        Text("Lines show percent used; drops to zero are quota-window resets; dots are the latest recorded values. Scroll right past “now” for the projected run-out.")
+                        Text("Lines show percent used; drops to zero are quota-window resets; dots are the latest recorded values. Drag the chart sideways to move through time — right of NOW is the projected run-out.")
                     }
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
@@ -338,21 +338,27 @@ struct StatisticsContent: View {
 
 /// The quota-burn chart plus its own horizontal navigation. Takes the already-decimated,
 /// full-history samples from the parent (so panning never re-runs that work) and owns only the
-/// visible-window position. When more history is recorded than one selected range can show, a
-/// slider scrubs through it at a fixed zoom — the visible window's width is always exactly
-/// `range.interval`, so the scale is preserved as you move back in time. The chart renders only
-/// the visible window (plus a small buffer for line continuity), so scrubbing stays cheap no
-/// matter how much history has accumulated. Uses `chartXScale` (macOS 13+), not the scrollable-
-/// axis APIs (macOS 14+), so a plain mouse gets an explicit, visible control rather than a
-/// gesture-only scroll.
+/// visible-window position. Grabbing the plot and dragging moves through time at a fixed zoom —
+/// the visible window's width is always exactly `range.interval`, so the scale is preserved
+/// wherever you drag it, back through history or forward into the forecast. The chart renders only
+/// the visible window (plus a small buffer for line continuity), so panning stays cheap no matter
+/// how much history has accumulated. Uses `chartXScale` (macOS 13+) driven by a `chartOverlay` drag
+/// gesture, not the scrollable-axis APIs (macOS 14+), which are above this app's deployment target.
 private struct BurnChartView: View {
     let samples: [UsageSample]        // decimated to the range's density; full retained history
     let snapshot: UsageSnapshot?
     let range: HistoryRange
     let chartHeight: CGFloat
 
-    /// Left edge of the visible window; `nil` means "the latest window" (the default view).
+    /// Left edge of the visible window. `nil` is not "some position" — it means *latched to live*:
+    /// the window follows `defaultStart` as new samples land. Any non-nil value pins an absolute
+    /// date and stops following, which is why `onEnded` re-latches when a drag lands back at the
+    /// right edge (see `endPan`).
     @State private var windowStart: Date?
+
+    /// `effectiveStart` captured when the current drag began. Held for the whole gesture because
+    /// `DragGesture.translation` is cumulative from its start, not a per-frame delta.
+    @State private var panAnchor: Date?
 
     // Background band tints. Kept subtle on-chart (they cover a large area); the legend
     // swatches use a stronger opacity so a small chip stays legible.
@@ -388,17 +394,16 @@ private struct BurnChartView: View {
     /// right from here walks into the forecast.
     private var defaultStart: Date { nowAnchor.addingTimeInterval(-range.interval) }
 
-    /// Scroll bounds. The lower one dips below `dataStart` when history is shorter than the
-    /// selected range, so the window keeps its full width (and therefore its scale) instead of
-    /// squeezing to fit whatever has been recorded so far.
-    private var scrollMin: Date { min(dataStart, defaultStart) }
-    private var scrollMax: Date { max(defaultStart, timelineEnd.addingTimeInterval(-range.interval)) }
+    /// Pan bounds. The lower one dips below `dataStart` when history is shorter than the selected
+    /// range, so the window keeps its full width (and therefore its scale) instead of squeezing to
+    /// fit whatever has been recorded so far.
+    private var panMin: Date { min(dataStart, defaultStart) }
+    private var panMax: Date { max(defaultStart, timelineEnd.addingTimeInterval(-range.interval)) }
 
-    /// Only offer the scrubber when the window can actually move — and never hand `Slider(in:)`
-    /// an empty range, which traps.
-    private var canScroll: Bool { scrollMax > scrollMin }
+    /// Whether the window can actually move; gates both the drag gesture and the navigation row.
+    private var canPan: Bool { panMax > panMin }
 
-    private func clamp(_ start: Date) -> Date { min(max(start, scrollMin), scrollMax) }
+    private func clamp(_ start: Date) -> Date { min(max(start, panMin), panMax) }
 
     private var effectiveStart: Date { clamp(windowStart ?? defaultStart) }
 
@@ -445,7 +450,7 @@ private struct BurnChartView: View {
     /// run-out the chart draws, or on the furthest reset when nothing runs out. nil when there is
     /// nothing to jump to, or when it is already on screen in the default view.
     private var forecastFocusStart: Date? {
-        guard canScroll, !chartForecasts.isEmpty else { return nil }
+        guard canPan, !chartForecasts.isEmpty else { return nil }
         let target = chartForecasts.compactMap(\.exhaustsAt).min() ?? chartForecasts.map(\.resetsAt).max()
         guard let target, target > nowAnchor else { return nil }
         let centred = clamp(target.addingTimeInterval(-range.interval / 2))
@@ -455,52 +460,100 @@ private struct BurnChartView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             burnChart.frame(height: chartHeight)
-            if canScroll { scrubber }
+            if canPan { navigationRow }
             chartLegend
             forecastSummary
         }
         // A new range means a new zoom and a fresh set of samples — snap back to the latest
-        // window so the chart always opens on "now" rather than a stale scrolled-away position.
-        .onChange(of: range) { _ in windowStart = nil }
+        // window so the chart always opens on "now" rather than a stale panned-away position.
+        .onChange(of: range) { _ in
+            windowStart = nil
+            panAnchor = nil
+        }
     }
 
-    /// The visible time span, shown next to the scrubber so it's clear which slice is on screen —
-    /// including the stretch to the right of "now", where only the forecast lives.
-    private var scrubber: some View {
+    /// Which slice is on screen, plus the two jumps a drag can't do quickly: back to the live edge,
+    /// and ahead to the projected finish line. The drag gesture handles everything in between, so
+    /// there is no slider here.
+    private var navigationRow: some View {
         HStack(spacing: 12) {
-            Slider(
-                value: Binding(
-                    get: { effectiveStart.timeIntervalSince1970 },
-                    set: { windowStart = clamp(Date(timeIntervalSince1970: $0)) }
-                ),
-                in: scrollMin.timeIntervalSince1970 ... scrollMax.timeIntervalSince1970
-            )
+            HStack(spacing: 5) {
+                Image(systemName: "hand.draw")
+                Text("Drag the chart to move through time")
+            }
+            .font(.system(size: 11))
+            .foregroundColor(.secondary)
+
+            Spacer()
+
             Text(windowLabel)
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .monospacedDigit()
-                .frame(width: 176, alignment: .leading)
+
+            // Latched-to-live is a state, not a position: disable on `windowStart == nil` rather
+            // than on a Date comparison, which a drag can land arbitrarily close to but never on.
             Button {
                 windowStart = nil
             } label: {
-                Image(systemName: "clock.arrow.circlepath")
+                Label("Now", systemImage: "clock.arrow.circlepath")
+                    .font(.system(size: 11))
             }
             .buttonStyle(.borderless)
-            .disabled(effectiveStart == clamp(defaultStart))
-            .help("Back to the latest readings")
+            .disabled(windowStart == nil)
+            .help("Jump back to the current time and follow it")
 
             // Without this the feature is unusable on the short ranges: at 6h the weekly run-out
-            // can sit dozens of window-widths to the right.
+            // can sit dozens of window-widths to the right — a long way to drag.
             Button {
                 if let start = forecastFocusStart { windowStart = start }
             } label: {
-                Image(systemName: "flag.checkered")
+                Label("Run-out", systemImage: "flag.checkered")
+                    .font(.system(size: 11))
             }
             .buttonStyle(.borderless)
             .disabled(forecastFocusStart == nil)
-            .help("Scroll ahead to the projected finish line")
+            .help("Jump ahead to the projected finish line")
         }
     }
+
+    /// Drag-to-pan, laid over the plot area. Uses `proxy.plotAreaSize.width`, not the view's width:
+    /// the Y-axis gutter is real width the X-domain does not span, so measuring the whole view
+    /// would pan a few percent off-scale — 100 points of drag moving more than 100 points' worth
+    /// of time.
+    private func panGesture(plotWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { value in
+                let base = panAnchor ?? effectiveStart
+                if panAnchor == nil { panAnchor = base }
+                NSCursor.closedHand.set()
+                windowStart = clamp(pannedStart(
+                    base: base,
+                    translationX: value.translation.width,
+                    plotWidth: plotWidth,
+                    interval: range.interval
+                ))
+            }
+            .onEnded { _ in
+                panAnchor = nil
+                NSCursor.openHand.set()
+                endPan()
+            }
+    }
+
+    /// Re-latch to live when a drag finishes at (or all but at) the right edge. Without this the
+    /// chart would *look* live while being pinned to an absolute date, and would appear to drift
+    /// left on its own as each new sample advanced `defaultStart` — and dragging to the right edge
+    /// is the natural gesture here, so that would be routine rather than theoretical.
+    private func endPan() {
+        guard let pinned = windowStart else { return }
+        let live = clamp(defaultStart)
+        if abs(pinned.timeIntervalSince(live)) <= Self.relatchTolerance { windowStart = nil }
+    }
+
+    /// One sampling interval's worth of slack: closer to the live edge than the next sample will
+    /// move it, so "near enough" really is indistinguishable from latched.
+    private static let relatchTolerance: TimeInterval = 4 * 60
 
     /// Visible span, with the time included on ranges of a day or less — scrolled into the
     /// forecast, a bare "Jul 28 – Jul 28" says nothing about where you are.
@@ -581,6 +634,19 @@ private struct BurnChartView: View {
         }
         .chartLegend(.hidden)   // replaced by the unified custom legend below the chart
         .chartForegroundStyleScale(domain: seriesLegendOrder, range: seriesLegendOrder.map(color(forSeries:)))
+        .chartOverlay { proxy in
+            // A transparent hit area over the marks. `chartOverlay` (not a plain `.gesture` on the
+            // Chart) both sits above the marks and hands us the plot geometry the pan needs.
+            Rectangle()
+                .fill(Color.clear)
+                .contentShape(Rectangle())
+                .gesture(panGesture(plotWidth: proxy.plotAreaSize.width), including: canPan ? .all : .none)
+                .onHover { inside in
+                    // Signals "this is draggable" before the user tries. push/pop pairs with
+                    // enter/exit; the drag callbacks use `.set()` so they don't nest a second push.
+                    if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
+                }
+        }
     }
 
     @ChartContentBuilder
@@ -710,19 +776,29 @@ private struct BurnChartView: View {
         }
     }
 
-    /// Boundary between what was recorded and what is merely projected. Load-bearing: without it a
-    /// dashed line sitting at 100 % reads as history.
+    /// The current time, and with it the boundary between what was recorded and what is merely
+    /// projected. Deliberately the most emphatic vertical on the chart: solid and full-contrast
+    /// against the dashed, muted gridlines, and badged rather than plain-labeled. Once the chart
+    /// pans freely, "where am I relative to now" stops being obvious from position alone, and a
+    /// dashed line sitting at 100 % must never read as something that already happened.
     @ChartContentBuilder
     private var nowDividerMark: some ChartContent {
         RuleMark(x: .value("Now", nowAnchor))
-            .foregroundStyle(Color.secondary.opacity(0.55))
-            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
-            .annotation(position: .top, spacing: 2) {
-                // Labeled, because unlabeled it is indistinguishable from a gridline — and a
-                // gridline carries none of the "everything right of here is a guess" meaning.
-                Text("now")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(.secondary)
+            .foregroundStyle(Color.primary.opacity(0.55))
+            .lineStyle(StrokeStyle(lineWidth: 1.5))
+            .annotation(position: .top, spacing: 3) {
+                Text("NOW \(nowAnchor, format: .dateTime.hour().minute())")
+                    .font(.system(size: 9, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundColor(.primary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule().fill(Color.primary.opacity(0.12))
+                    )
+                    .overlay(
+                        Capsule().stroke(Color.primary.opacity(0.28), lineWidth: 0.5)
+                    )
             }
     }
 
@@ -761,7 +837,7 @@ private struct BurnChartView: View {
                                 Capsule().fill(Color.secondary).frame(width: 8, height: 2.5)
                             }
                         },
-                        "Forecast at the current pace — scroll right"
+                        "Forecast at the current pace"
                     )
                     legendItem(
                         Rectangle().fill(Color.secondary).frame(width: 1.5, height: 11),
@@ -1114,6 +1190,19 @@ struct BurnPoint: Identifiable {
     let percent: Double
 }
 
+/// New left edge of the visible window after dragging `translationX` points horizontally, at a
+/// fixed zoom of `interval` seconds across `plotWidth` points. Dragging **right** pulls earlier
+/// time into view, so the window moves *backwards* — the content follows the cursor, as with any
+/// grab-and-move surface. `base` is the window start captured when the gesture began, since
+/// `DragGesture.translation` is cumulative from that instant rather than a per-frame delta.
+/// A zero or negative plot width (a chart laid out at zero size) yields `base` unchanged, which
+/// keeps a divide-by-zero from throwing the window to a nonsense date.
+func pannedStart(base: Date, translationX: CGFloat, plotWidth: CGFloat, interval: TimeInterval) -> Date {
+    guard plotWidth > 0 else { return base }
+    let secondsPerPoint = interval / Double(plotWidth)
+    return base.addingTimeInterval(-Double(translationX) * secondsPerPoint)
+}
+
 /// Where one quota window is headed, as a polyline the chart can draw to the right of "now".
 /// `points` are unlabeled `(Date, Double)` pairs to match `idealPaceLines`, which Charts' `ForEach`
 /// keys by `\.0`.
@@ -1376,7 +1465,25 @@ func runFastBurnSegmentsSelfCheck() {
     assert(!starts.isEmpty)
     assert(starts.allSatisfy { $0 < to && $0.addingTimeInterval(wDur) > from })   // each overlaps the range
 
-    // Forecast shapes — the lines you scroll right to see.
+    // Drag-to-pan conversion. Sign first: dragging right pulls earlier time into view, so the
+    // window start moves BACKWARDS — get this backwards and the chart fights the cursor.
+    let panBase = Date(timeIntervalSince1970: 1_700_000_000)
+    let sixHours: TimeInterval = 6 * 3600
+    assert(pannedStart(base: panBase, translationX: 100, plotWidth: 800, interval: sixHours) < panBase)
+    assert(pannedStart(base: panBase, translationX: -100, plotWidth: 800, interval: sixHours) > panBase)
+    // Scale: half the plot width is half the visible interval, exactly.
+    assert(pannedStart(base: panBase, translationX: 400, plotWidth: 800, interval: sixHours)
+           == panBase.addingTimeInterval(-sixHours / 2))
+    // A full plot width pans by exactly one window, whatever the zoom.
+    for interval in [sixHours, 86400, 30 * 86400] as [TimeInterval] {
+        assert(pannedStart(base: panBase, translationX: -640, plotWidth: 640, interval: interval)
+               == panBase.addingTimeInterval(interval))
+    }
+    assert(pannedStart(base: panBase, translationX: 0, plotWidth: 800, interval: sixHours) == panBase)
+    // Zero-width plot: no movement, rather than a divide-by-zero flinging the window to a bad date.
+    assert(pannedStart(base: panBase, translationX: 250, plotWidth: 0, interval: sixHours) == panBase)
+
+    // Forecast shapes — the lines the chart draws to the right of "now".
     let fNow = Date(timeIntervalSince1970: 1_700_000_000)
     let fReset = fNow.addingTimeInterval(4 * 3600)
     // Projected to run out: rises to 100 % at the run-out instant, then flat to the reset.
