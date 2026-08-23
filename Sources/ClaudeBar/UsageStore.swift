@@ -1,6 +1,15 @@
 import SwiftUI
 import Combine
 
+/// File-scope (not a static member of the @MainActor class) so it can be referenced from a
+/// default parameter value — a static let on a @MainActor type is itself main-actor-isolated,
+/// which a default-argument expression can't reference without a compiler warning.
+private let normalPollInterval: TimeInterval = 300
+/// Tighter cadence once a limit is close to the dialog thresholds, so a crossing is caught
+/// sooner — without going so low it out-hammers an endpoint that already needs exponential
+/// 429 backoff.
+private let dangerZonePollInterval: TimeInterval = 120
+
 @MainActor
 final class UsageStore: ObservableObject {
     @Published var snapshot: UsageSnapshot?
@@ -17,6 +26,9 @@ final class UsageStore: ObservableObject {
 
     /// Standard macOS banners when a limit crosses into attention-worthy territory.
     private let notifications = NotificationManager()
+
+    /// Focus-stealing dialog for the last-resort case: a limit genuinely about to run out.
+    private let limitAlerts = LimitAlertPresenter()
 
     private var timer: Timer?
     private var rateLimitedUntil: Date?
@@ -45,6 +57,10 @@ final class UsageStore: ObservableObject {
     /// small and the `1 <<` shift in rateLimitBackoff(forStreak:) safe from overflow.
     private static let maxRateLimitStreak = 6
     private static let staleThreshold: TimeInterval = 10 * 60
+    #if DEBUG
+    private static let fakeLimitDebugModeActive =
+        ProcessInfo.processInfo.environment["CLAUDEBAR_FAKE_LIMIT"] != nil
+    #endif
     /// Minimum gap between any two automatic fetches. Bounds every unforced path
     /// (timer, activity, retry) regardless of error state, so a sustained failure
     /// can't turn the 5s ActivityWatcher into an API hammer. Kept below the 60s
@@ -59,6 +75,13 @@ final class UsageStore: ObservableObject {
         loadPersistedRateLimit()
         reloadActivity()
         notifications.requestAuthorization()
+        #if DEBUG
+        // CLAUDEBAR_FAKE_LIMIT lets the limit dialog be verified on demand — the real
+        // 10%/5% thresholds otherwise depend on actually running the account near empty.
+        if ProcessInfo.processInfo.environment["CLAUDEBAR_FAKE_LIMIT"] != nil {
+            injectFakeLimitSnapshot()
+        }
+        #endif
         // Skip the startup probe while a persisted backoff window is still active: probing
         // would hit the live limit and re-arm the backoff. Surface the remaining wait
         // instead; the timer probes once the window elapses.
@@ -100,6 +123,14 @@ final class UsageStore: ObservableObject {
     /// A manual Refresh (`force: true`) bypasses the usage-endpoint rate-limit backoff.
     func refresh(force: Bool = false) async {
         guard !isLoading else { return }
+        #if DEBUG
+        // While CLAUDEBAR_FAKE_LIMIT is verifying the dialog, a real fetch landing moments
+        // later would find healthy usage and immediately close the fake dialog as
+        // "recovered" — defeating the one thing this hook is for. Block every real refresh
+        // (timer, activity, manual) for the rest of this debug process, not just the
+        // startup one.
+        guard !Self.fakeLimitDebugModeActive else { return }
+        #endif
 
         if !force {
             if let until = rateLimitedUntil, until > Date() {
@@ -130,6 +161,8 @@ final class UsageStore: ObservableObject {
                 errorMessage = nil
                 history.record(snap)
                 notifications.evaluate(recommendation)
+                limitAlerts.evaluate(snap)
+                rescheduleTimer(for: snap)
             } else {
                 errorMessage = "No session data from API."
             }
@@ -172,6 +205,12 @@ final class UsageStore: ObservableObject {
         } catch {
             launchAtLogin = LaunchAtLogin.isEnabled
         }
+    }
+
+    /// So unchecking "Alert dialog on critical limits" closes an already-open dialog right
+    /// away, instead of leaving it up until the next refresh happens to notice the setting.
+    func setLimitDialogEnabled(_ enabled: Bool) {
+        limitAlerts.settingChanged(enabled: enabled)
     }
 
     private func refreshOnActivity() async {
@@ -238,10 +277,33 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    private func scheduleTimer() {
-        timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+    /// Twice the dialog's own thresholds, so the faster poll engages a little before a
+    /// crossing, not exactly at it. Derived from `LimitAlertPresenter`'s named constants
+    /// rather than separate magic numbers, so the two can't silently drift apart.
+    private static let dangerZoneSessionThreshold = LimitAlertPresenter.sessionThreshold * 2
+    private static let dangerZoneWeeklyThreshold = LimitAlertPresenter.weeklyThreshold * 2
+
+    private func scheduleTimer(interval: TimeInterval = normalPollInterval) {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in await self?.refresh() }
         }
+    }
+
+    /// Switches the polling cadence based on how close the latest snapshot is to the
+    /// limit-dialog thresholds. Only reschedules when the tier actually changes, so a
+    /// healthy run doesn't keep tearing down and rebuilding the same 300s timer. Skipped
+    /// entirely when the dialog is disabled — the whole point of polling faster is to feed
+    /// it sooner, so there's nothing to gain from the extra requests otherwise.
+    private func rescheduleTimer(for snapshot: UsageSnapshot) {
+        let nearDanger = LimitAlertPresenter.isEnabled && (
+            snapshot.session.remainingPercent < Self.dangerZoneSessionThreshold
+            || (snapshot.weekly?.remainingPercent ?? 100) < Self.dangerZoneWeeklyThreshold
+            || (snapshot.scopedWeekly?.remainingPercent ?? 100) < Self.dangerZoneWeeklyThreshold
+        )
+        let target = nearDanger ? dangerZonePollInterval : normalPollInterval
+        guard timer?.timeInterval != target else { return }
+        scheduleTimer(interval: target)
     }
 
     /// Exponential backoff for the Nth consecutive 429: 6, 12, 24, 48 min, capped at 60.
@@ -371,4 +433,25 @@ final class UsageStore: ObservableObject {
         formatter.setLocalizedDateFormatFromTemplate(Calendar.autoupdatingCurrent.isDateInToday(date) ? "HHmm" : "dMMMHHmm")
         return formatter.string(from: date)
     }
+
+    #if DEBUG
+    /// Fabricates a snapshot with the session at 92% used and both weekly windows at 96%,
+    /// so `LimitAlertPresenter.evaluate` fires the dialog without waiting on real usage.
+    private func injectFakeLimitSnapshot() {
+        let resetsAtSession = Date().addingTimeInterval(3600)
+        let resetsAtWeekly = Date().addingTimeInterval(3 * 24 * 3600)
+        let snap = UsageSnapshot(
+            session: RateWindow(usedPercent: 92, windowDuration: 5 * 3600, resetsAt: resetsAtSession),
+            weekly: RateWindow(usedPercent: 96, windowDuration: 168 * 3600, resetsAt: resetsAtWeekly),
+            scopedWeekly: RateWindow(usedPercent: 96, windowDuration: 168 * 3600, resetsAt: resetsAtWeekly),
+            scopedModelName: "Opus"
+        )
+        snapshot = snap
+        lastUpdated = Date()
+        limitAlerts.evaluate(snap)
+        // Don't let a debug session leave fabricated suppression timestamps behind under
+        // the same persisted keys real alerts use.
+        limitAlerts.clearDebugState()
+    }
+    #endif
 }

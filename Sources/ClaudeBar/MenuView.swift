@@ -8,6 +8,7 @@ struct MenuView: View {
     @AppStorage(UsageStore.newPaceUIKey) private var newPaceUI = true
     @AppStorage(AutoUpdater.autoUpdateKey) private var autoUpdate = true
     @AppStorage(NotificationManager.enabledKey) private var notificationsEnabled = true
+    @AppStorage(LimitAlertPresenter.enabledKey) private var limitDialogEnabled = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -457,6 +458,20 @@ struct MenuView: View {
             HStack {
                 Toggle(isOn: $notificationsEnabled) {
                     Text("Notify on limit alerts")
+                        .font(.system(size: 11))
+                }
+                .toggleStyle(.checkbox)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 4)
+
+            HStack {
+                Toggle(isOn: Binding(
+                    get: { limitDialogEnabled },
+                    set: { limitDialogEnabled = $0; store.setLimitDialogEnabled($0) }
+                )) {
+                    Text("Alert dialog on critical limits")
                         .font(.system(size: 11))
                 }
                 .toggleStyle(.checkbox)
