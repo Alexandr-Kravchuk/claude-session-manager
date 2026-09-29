@@ -579,6 +579,7 @@ private struct BurnChartView: View {
             dayDividerMarks
             idealPaceMarks
             seriesMarks
+            currentLevelMarks
             overRateMarks
             latestPointMarks
             forecastMarks
@@ -699,6 +700,38 @@ private struct BurnChartView: View {
             .foregroundStyle(by: .value("Window", point.series))
             .interpolationMethod(.linear)
         }
+    }
+
+    /// A horizontal reference for each live limit, extending from NOW through the future
+    /// timeline. Unlike the rising pace forecast, this shows the level already used.
+    @ChartContentBuilder
+    private var currentLevelMarks: some ChartContent {
+        if domainEnd > nowAnchor {
+            ForEach(currentLevelPoints) { point in
+                ForEach([nowAnchor, timelineEnd], id: \.self) { date in
+                    LineMark(
+                        x: .value("Time", date),
+                        y: .value("Current used %", point.percent),
+                        series: .value("Window", "current-\(point.series)")
+                    )
+                    .foregroundStyle(color(forSeries: point.series).opacity(0.6))
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+                }
+            }
+        }
+    }
+
+    private var currentLevelPoints: [BurnPoint] {
+        guard let snapshot else { return [] }
+        var points = [BurnPoint(date: nowAnchor, series: "Session (5h)", percent: snapshot.session.usedPercent)]
+        if let weekly = snapshot.weekly {
+            points.append(BurnPoint(date: nowAnchor, series: "Weekly", percent: weekly.usedPercent))
+        }
+        if let scoped = snapshot.scopedWeekly {
+            let name = snapshot.scopedModelName.map { "\($0) (7d)" } ?? "Model (7d)"
+            points.append(BurnPoint(date: nowAnchor, series: name, percent: scoped.usedPercent))
+        }
+        return points
     }
 
     /// Thick red overlay on the Session (5h) line where it climbed faster than normal, drawn after
@@ -831,6 +864,14 @@ private struct BurnChartView: View {
             }
             if !chartForecasts.isEmpty {
                 HStack(spacing: 16) {
+                    legendItem(
+                        HStack(spacing: 2) {
+                            ForEach(0..<3, id: \.self) { _ in
+                                Capsule().fill(Color.secondary).frame(width: 4, height: 2)
+                            }
+                        },
+                        "Current level through remaining time"
+                    )
                     legendItem(
                         HStack(spacing: 3) {
                             ForEach(0..<2, id: \.self) { _ in
