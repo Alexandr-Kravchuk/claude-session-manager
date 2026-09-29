@@ -12,8 +12,12 @@ APP_PATH="${APP_PATH:-/Applications/$APP_NAME.app}"
 source "$(dirname "$0")/preflight.sh"
 
 echo "→ Building universal release binary (arm64 + x86_64)..."
+# Newer SwiftPM writes both architectures to the same bin path, so keep a copy of the
+# arm64 binary before the x86_64 build overwrites it.
+ARM_BIN="$(mktemp -t claudebar-arm64)"
+trap 'rm -f "$ARM_BIN"' EXIT
 swift build -c release --arch arm64
-ARM_BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path)"
+cp "$(swift build -c release --arch arm64 --show-bin-path)/$APP_NAME" "$ARM_BIN"
 swift build -c release --arch x86_64
 X86_BIN_DIR="$(swift build -c release --arch x86_64 --show-bin-path)"
 
@@ -23,7 +27,7 @@ mkdir -p "$APP_PATH/Contents/MacOS"
 mkdir -p "$APP_PATH/Contents/Resources"
 
 lipo -create \
-    "$ARM_BIN_DIR/$APP_NAME" \
+    "$ARM_BIN" \
     "$X86_BIN_DIR/$APP_NAME" \
     -output "$APP_PATH/Contents/MacOS/$APP_NAME"
 cp "Sources/ClaudeBar/Assets/AppIcon.icns" "$APP_PATH/Contents/Resources/AppIcon.icns"
