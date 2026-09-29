@@ -3,3 +3,4 @@
 *.d
 dist/
 .DS_Store
+.swiftpm/
