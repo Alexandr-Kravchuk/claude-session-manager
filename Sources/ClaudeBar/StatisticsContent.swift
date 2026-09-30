@@ -350,6 +350,9 @@ private struct BurnChartView: View {
     let range: HistoryRange
     let chartHeight: CGFloat
 
+    @AppStorage("weeklyPaceExcludeWeekends") private var excludeWeekends = true
+    @AppStorage("weeklyPaceExcludeNights") private var excludeNights = false
+
     /// Left edge of the visible window. `nil` is not "some position" — it means *latched to live*:
     /// the window follows `defaultStart` as new samples land. Any non-nil value pins an absolute
     /// date and stops following, which is why `onEnded` re-latches when a drag lands back at the
@@ -461,6 +464,16 @@ private struct BurnChartView: View {
         VStack(alignment: .leading, spacing: 12) {
             burnChart.frame(height: chartHeight)
             if canPan { navigationRow }
+            HStack(spacing: 16) {
+                Text("Weekly ideal pace:")
+                    .foregroundColor(.secondary)
+                Toggle("Exclude weekends", isOn: $excludeWeekends)
+                    .help("Keep the green ideal-pace line flat on Saturday and Sunday")
+                Toggle("Exclude nights (00:00–08:00)", isOn: $excludeNights)
+                    .help("Keep the green ideal-pace line flat from midnight to 08:00 in your local time zone")
+            }
+            .toggleStyle(.checkbox)
+            .font(.system(size: 11))
             chartLegend
             forecastSummary
         }
@@ -673,7 +686,7 @@ private struct BurnChartView: View {
     }
 
     /// Dashed "ideal pace" reference per window — rising from 0 % at the window's start to 100 %
-    /// at its reset (the 7d lines run flat over weekends). Under the real series.
+    /// at its reset (weekly exclusions are configurable). Under the real series.
     @ChartContentBuilder
     private var idealPaceMarks: some ChartContent {
         ForEach(Array(idealPaceLines.enumerated()), id: \.offset) { index, line in
@@ -1002,11 +1015,11 @@ private struct BurnChartView: View {
             lines.append((series, [(windowStart, 0), (end, 100)]))
         }
 
-        // Weekend-aware line for the weekly windows (see `weekdayPacedPoints`): climbs Mon–Fri,
-        // flat Sat/Sun. Falls back to a straight line if the window somehow has no weekday time.
+        // Weekly reference uses the selected calendar exclusions, with a linear fallback.
         func addWeekdayPaced(_ series: String, windowStart: Date, duration: TimeInterval) {
             guard windowStart.addingTimeInterval(duration) > lo, windowStart < hi else { return }
-            if let points = weekdayPacedPoints(windowStart: windowStart, duration: duration) {
+            if let points = weekdayPacedPoints(windowStart: windowStart, duration: duration,
+                                               excludeWeekends: excludeWeekends, excludeNights: excludeNights) {
                 lines.append((series, points.map { ($0.date, $0.percent) }))
             } else {
                 addLinear(series, windowStart: windowStart, duration: duration)
@@ -1389,28 +1402,31 @@ func sessionWindows(
     return windows
 }
 
-/// Points of a weekend-aware "ideal pace" line for a weekly window: 100 % is spread evenly
-/// across the window's weekday SECONDS, so the line climbs Mon–Fri, runs flat on Sat/Sun, and
-/// still reaches exactly 100 % at the reset. Partial edge days (the reset rarely lands at
-/// midnight) count proportionally. Returns nil when the window has no weekday seconds at all,
-/// so the caller can fall back to a plain straight line.
-func weekdayPacedPoints(windowStart: Date, duration: TimeInterval) -> [(date: Date, percent: Double)]? {
+/// Spread 100 % over eligible seconds, keeping excluded local calendar periods flat.
+/// Calendar boundaries preserve midnight/08:00 through daylight-saving transitions.
+/// Returns nil if there is no eligible time, allowing a linear fallback.
+func weekdayPacedPoints(windowStart: Date, duration: TimeInterval,
+                        excludeWeekends: Bool = true, excludeNights: Bool = false,
+                        calendar cal: Calendar = .current) -> [(date: Date, percent: Double)]? {
     let windowEnd = windowStart.addingTimeInterval(duration)
-    let cal = Calendar.current
-    // A day is a weekend day by the calendar weekday of its start instant (1 = Sun, 7 = Sat).
-    var segments: [(end: Date, isWeekend: Bool)] = []
+    var segments: [(end: Date, excluded: Bool)] = []
     var t = windowStart
     while t < windowEnd {
-        guard let nextDay = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: t)) else { break }
-        let segEnd = min(nextDay, windowEnd)
+        let dayStart = cal.startOfDay(for: t)
+        guard let nextDay = cal.date(byAdding: .day, value: 1, to: dayStart), nextDay > t else { return nil }
+        let morning = cal.date(bySettingHour: 8, minute: 0, second: 0, of: dayStart)!
+        let boundary = excludeNights && t < morning ? morning : nextDay
+        let segEnd = min(boundary, windowEnd)
         let weekday = cal.component(.weekday, from: t)
-        segments.append((segEnd, weekday == 1 || weekday == 7))
+        let excluded = (excludeWeekends && (weekday == 1 || weekday == 7))
+            || (excludeNights && t < morning)
+        segments.append((segEnd, excluded))
         t = segEnd
     }
     var segStart = windowStart
     var workSeconds = 0.0
     for seg in segments {
-        if !seg.isWeekend { workSeconds += seg.end.timeIntervalSince(segStart) }
+        if !seg.excluded { workSeconds += seg.end.timeIntervalSince(segStart) }
         segStart = seg.end
     }
     guard workSeconds > 0 else { return nil }
@@ -1418,7 +1434,7 @@ func weekdayPacedPoints(windowStart: Date, duration: TimeInterval) -> [(date: Da
     var cum = 0.0
     segStart = windowStart
     for seg in segments {
-        if !seg.isWeekend { cum += seg.end.timeIntervalSince(segStart) / workSeconds * 100 }
+        if !seg.excluded { cum += seg.end.timeIntervalSince(segStart) / workSeconds * 100 }
         points.append((seg.end, cum))
         segStart = seg.end
     }
