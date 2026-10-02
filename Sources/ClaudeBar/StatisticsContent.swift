@@ -363,6 +363,9 @@ private struct BurnChartView: View {
     /// `DragGesture.translation` is cumulative from its start, not a per-frame delta.
     @State private var panAnchor: Date?
 
+    /// Cursor position over the plot, in the chart overlay's coordinates; nil once it leaves.
+    @State private var hoverLocation: CGPoint?
+
     // Background band tints. Kept subtle on-chart (they cover a large area); the legend
     // swatches use a stronger opacity so a small chip stays legible.
     private let workHourTint = Color.secondary
@@ -592,7 +595,6 @@ private struct BurnChartView: View {
             dayDividerMarks
             idealPaceMarks
             seriesMarks
-            currentLevelMarks
             overRateMarks
             latestPointMarks
             forecastMarks
@@ -651,16 +653,121 @@ private struct BurnChartView: View {
         .chartOverlay { proxy in
             // A transparent hit area over the marks. `chartOverlay` (not a plain `.gesture` on the
             // Chart) both sits above the marks and hands us the plot geometry the pan needs.
-            Rectangle()
-                .fill(Color.clear)
-                .contentShape(Rectangle())
-                .gesture(panGesture(plotWidth: proxy.plotAreaSize.width), including: canPan ? .all : .none)
-                .onHover { inside in
-                    // Signals "this is draggable" before the user tries. push/pop pairs with
-                    // enter/exit; the drag callbacks use `.set()` so they don't nest a second push.
-                    if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
+            GeometryReader { geo in
+                let plot = geo[proxy.plotAreaFrame]
+                ZStack(alignment: .topLeading) {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .contentShape(Rectangle())
+                        .gesture(panGesture(plotWidth: proxy.plotAreaSize.width), including: canPan ? .all : .none)
+                        .onHover { inside in
+                            // Signals "this is draggable" before the user tries. push/pop pairs with
+                            // enter/exit; the drag callbacks use `.set()` so they don't nest a second push.
+                            if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
+                        }
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location): hoverLocation = location
+                            case .ended: hoverLocation = nil
+                            }
+                        }
+                    // Hidden mid-drag: the window is moving under the cursor, so a readout would
+                    // only flicker between whatever lines pass by.
+                    if panAnchor == nil, let location = hoverLocation,
+                       let hit = hoverHit(at: location, plot: plot, proxy: proxy) {
+                        hoverReadout(hit, plot: plot)
+                    }
                 }
+            }
         }
+    }
+
+    /// How close (in points, vertically) the cursor must be to a line for the readout to latch on.
+    private static let hoverSnapDistance: CGFloat = 10
+
+    private struct HoverHit {
+        let date: Date
+        let percent: Double
+        let series: String
+        let point: CGPoint      // overlay coordinates of the snapped point on the line
+    }
+
+    /// Every polyline the chart draws that is worth reading a value off, in the same series
+    /// naming `color(forSeries:)` understands. The over-rate overlay is left out: it traces the
+    /// session line exactly, so the session line already answers for it.
+    private var hoverableLines: [(series: String, points: [(Date, Double)])] {
+        var lines: [(series: String, points: [(Date, Double)])] = []
+        let recorded = Dictionary(grouping: visibleBurnSeries, by: \.series)
+        for series in seriesLegendOrder {
+            if let points = recorded[series] { lines.append((series, points.map { ($0.date, $0.percent) })) }
+        }
+        for forecast in chartForecasts { lines.append((forecast.series, forecast.points)) }
+        lines.append(contentsOf: idealPaceLines)
+        return lines
+    }
+
+    /// The line point nearest the cursor vertically at the cursor's time, if one is within
+    /// `hoverSnapDistance`. Ties go to the earlier line in `hoverableLines`, i.e. recorded data
+    /// over projections over the ideal-pace reference.
+    private func hoverHit(at location: CGPoint, plot: CGRect, proxy: ChartProxy) -> HoverHit? {
+        guard plot.contains(location),
+              let date: Date = proxy.value(atX: location.x - plot.minX) else { return nil }
+        var best: HoverHit?
+        var bestDistance = Self.hoverSnapDistance
+        for line in hoverableLines {
+            guard let percent = interpolatedPercent(line.points, at: date),
+                  let y = proxy.position(forY: percent) else { continue }
+            let distance = abs(plot.minY + y - location.y)
+            if distance < bestDistance {
+                bestDistance = distance
+                best = HoverHit(date: date, percent: percent, series: line.series,
+                                point: CGPoint(x: location.x, y: plot.minY + y))
+            }
+        }
+        return best
+    }
+
+    /// Crosshair through the snapped point, with the exact value badged on the right edge of the
+    /// plot (over the Y-axis labels) and the exact time badged under it (over the X-axis labels).
+    @ViewBuilder
+    private func hoverReadout(_ hit: HoverHit, plot: CGRect) -> some View {
+        let tint = color(forSeries: hit.series)
+        Path { path in
+            path.move(to: CGPoint(x: hit.point.x, y: plot.minY))
+            path.addLine(to: CGPoint(x: hit.point.x, y: plot.maxY))
+            path.move(to: CGPoint(x: plot.minX, y: hit.point.y))
+            path.addLine(to: CGPoint(x: plot.maxX, y: hit.point.y))
+        }
+        .stroke(tint.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
+        .allowsHitTesting(false)
+
+        Circle()
+            .fill(tint)
+            .frame(width: 7, height: 7)
+            .position(hit.point)
+            .allowsHitTesting(false)
+
+        hoverBadge(String(format: "%.1f%%", hit.percent), tint: tint)
+            .fixedSize()
+            .alignmentGuide(.leading) { _ in -(plot.maxX + 2) }
+            .alignmentGuide(.top) { d in -(hit.point.y - d.height / 2) }
+            .allowsHitTesting(false)
+
+        hoverBadge(hit.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()), tint: tint)
+            .fixedSize()
+            .alignmentGuide(.leading) { d in -(hit.point.x - d.width / 2) }
+            .alignmentGuide(.top) { _ in -(plot.maxY + 2) }
+            .allowsHitTesting(false)
+    }
+
+    private func hoverBadge(_ text: String, tint: Color) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold))
+            .monospacedDigit()
+            .foregroundColor(.white)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 4).fill(tint))
     }
 
     @ChartContentBuilder
@@ -713,38 +820,6 @@ private struct BurnChartView: View {
             .foregroundStyle(by: .value("Window", point.series))
             .interpolationMethod(.linear)
         }
-    }
-
-    /// A horizontal reference for each live limit, extending from NOW through the future
-    /// timeline. Unlike the rising pace forecast, this shows the level already used.
-    @ChartContentBuilder
-    private var currentLevelMarks: some ChartContent {
-        if domainEnd > nowAnchor {
-            ForEach(currentLevelPoints) { point in
-                ForEach([nowAnchor, timelineEnd], id: \.self) { date in
-                    LineMark(
-                        x: .value("Time", date),
-                        y: .value("Current used %", point.percent),
-                        series: .value("Window", "current-\(point.series)")
-                    )
-                    .foregroundStyle(color(forSeries: point.series).opacity(0.6))
-                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
-                }
-            }
-        }
-    }
-
-    private var currentLevelPoints: [BurnPoint] {
-        guard let snapshot else { return [] }
-        var points = [BurnPoint(date: nowAnchor, series: "Session (5h)", percent: snapshot.session.usedPercent)]
-        if let weekly = snapshot.weekly {
-            points.append(BurnPoint(date: nowAnchor, series: "Weekly", percent: weekly.usedPercent))
-        }
-        if let scoped = snapshot.scopedWeekly {
-            let name = snapshot.scopedModelName.map { "\($0) (7d)" } ?? "Model (7d)"
-            points.append(BurnPoint(date: nowAnchor, series: name, percent: scoped.usedPercent))
-        }
-        return points
     }
 
     /// Thick red overlay on the Session (5h) line where it climbed faster than normal, drawn after
@@ -877,14 +952,6 @@ private struct BurnChartView: View {
             }
             if !chartForecasts.isEmpty {
                 HStack(spacing: 16) {
-                    legendItem(
-                        HStack(spacing: 2) {
-                            ForEach(0..<3, id: \.self) { _ in
-                                Capsule().fill(Color.secondary).frame(width: 4, height: 2)
-                            }
-                        },
-                        "Current level through remaining time"
-                    )
                     legendItem(
                         HStack(spacing: 3) {
                             ForEach(0..<2, id: \.self) { _ in
@@ -1255,6 +1322,21 @@ func pannedStart(base: Date, translationX: CGFloat, plotWidth: CGFloat, interval
     guard plotWidth > 0 else { return base }
     let secondsPerPoint = interval / Double(plotWidth)
     return base.addingTimeInterval(-Double(translationX) * secondsPerPoint)
+}
+
+/// Value of a date-ordered polyline at `date`, linearly interpolated between its neighbouring
+/// vertices — what the chart draws there with `.linear` interpolation. nil outside the line's
+/// span, so a line that starts or stops mid-chart never answers for time it does not cover.
+func interpolatedPercent(_ points: [(Date, Double)], at date: Date) -> Double? {
+    guard let first = points.first, let last = points.last,
+          date >= first.0, date <= last.0 else { return nil }
+    guard let upper = points.firstIndex(where: { $0.0 >= date }) else { return nil }
+    if upper == 0 { return first.1 }
+    let (d0, v0) = points[upper - 1]
+    let (d1, v1) = points[upper]
+    let span = d1.timeIntervalSince(d0)
+    guard span > 0 else { return v1 }
+    return v0 + (v1 - v0) * date.timeIntervalSince(d0) / span
 }
 
 /// Where one quota window is headed, as a polyline the chart can draw to the right of "now".
