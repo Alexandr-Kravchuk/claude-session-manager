@@ -398,18 +398,27 @@ private struct BurnChartView: View {
 
     /// The window the chart opens on: latest readings flush against the right edge. Scrolling
     /// right from here walks into the forecast.
-    private var defaultStart: Date { nowAnchor.addingTimeInterval(-range.interval) }
+    private var defaultStart: Date { defaultStart(interval: range.interval) }
+    private func defaultStart(interval: TimeInterval) -> Date { nowAnchor.addingTimeInterval(-interval) }
 
     /// Pan bounds. The lower one dips below `dataStart` when history is shorter than the selected
     /// range, so the window keeps its full width (and therefore its scale) instead of squeezing to
-    /// fit whatever has been recorded so far.
-    private var panMin: Date { min(dataStart, defaultStart) }
-    private var panMax: Date { max(defaultStart, timelineEnd.addingTimeInterval(-range.interval)) }
+    /// fit whatever has been recorded so far. Parameterised by window width so a zoom change can
+    /// still evaluate the bounds of the range it is leaving.
+    private func panMin(interval: TimeInterval) -> Date { min(dataStart, defaultStart(interval: interval)) }
+    private func panMax(interval: TimeInterval) -> Date {
+        max(defaultStart(interval: interval), timelineEnd.addingTimeInterval(-interval))
+    }
+    private var panMin: Date { panMin(interval: range.interval) }
+    private var panMax: Date { panMax(interval: range.interval) }
 
     /// Whether the window can actually move; gates both the drag gesture and the navigation row.
     private var canPan: Bool { panMax > panMin }
 
-    private func clamp(_ start: Date) -> Date { min(max(start, panMin), panMax) }
+    private func clamp(_ start: Date) -> Date { clamp(start, interval: range.interval) }
+    private func clamp(_ start: Date, interval: TimeInterval) -> Date {
+        min(max(start, panMin(interval: interval)), panMax(interval: interval))
+    }
 
     private var effectiveStart: Date { clamp(windowStart ?? defaultStart) }
 
@@ -480,12 +489,29 @@ private struct BurnChartView: View {
             chartLegend
             forecastSummary
         }
-        // A new range means a new zoom and a fresh set of samples — snap back to the latest
-        // window so the chart always opens on "now" rather than a stale panned-away position.
-        .onChange(of: range) { _ in
-            windowStart = nil
+        // The capture list pins the range being left, so the zoom can be measured from it.
+        .onChange(of: range) { [range] newRange in
             panAnchor = nil
+            windowStart = zoomedStart(from: range.interval, to: newRange.interval)
         }
+    }
+
+    /// Window start after a zoom change that keeps NOW at the same spot on screen. Latched to live
+    /// stays latched (NOW on the right edge either way). With NOW panned out of view there is no
+    /// spot to keep, so the zoom centres on the middle of the window instead.
+    private func zoomedStart(from oldInterval: TimeInterval, to newInterval: TimeInterval) -> Date? {
+        guard let pinned = windowStart else { return nil }
+        let start = clamp(pinned, interval: oldInterval)
+        let nowOffset = nowAnchor.timeIntervalSince(start)
+        let zoomed: Date
+        if (0...oldInterval).contains(nowOffset) {
+            zoomed = nowAnchor.addingTimeInterval(-nowOffset / oldInterval * newInterval)
+        } else {
+            zoomed = start.addingTimeInterval((oldInterval - newInterval) / 2)
+        }
+        let clamped = clamp(zoomed, interval: newInterval)
+        let live = clamp(defaultStart(interval: newInterval), interval: newInterval)
+        return abs(clamped.timeIntervalSince(live)) <= Self.relatchTolerance ? nil : clamped
     }
 
     /// Which slice is on screen, plus the two jumps a drag can't do quickly: back to the live edge,
