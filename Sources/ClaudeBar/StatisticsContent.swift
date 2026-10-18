@@ -176,18 +176,22 @@ struct StatisticsContent: View {
     /// decimated to a per-range density so a single visible window draws a few hundred marks.
     /// Depends only on `samples` and `range` — never on the chart's scroll position — so panning
     /// through history never re-runs it; `BurnChartView` crops this to the visible window.
-    /// A session reset (a drop, or the peak right before it) and the latest sample are always
-    /// kept so resets stay sharp.
+    /// A reset of any window (a drop, or the peak right before it) and the latest sample are
+    /// always kept so resets stay sharp — and so an off-schedule weekly reset is still found by
+    /// `offScheduleResets` at the coarse 14d/30d densities.
     private var chartSamples: [UsageSample] {
         // Aim for ~this many points across one visible window: smooth lines without flooding
         // Charts. Over the widest window (30d) this alone bounds the set; narrower windows lean
         // on BurnChartView's crop instead, so their minGap can stay below the ~4-min sampling.
         let minGap = range.interval / 400
+        func drops(_ a: UsageSample, _ b: UsageSample) -> Bool {
+            b.session < a.session || (b.weekly ?? 0) < (a.weekly ?? 0) || (b.scoped ?? 0) < (a.scoped ?? 0)
+        }
         var kept: [UsageSample] = []
         for (i, sample) in samples.enumerated() {
             let isLast = i == samples.count - 1
-            let dropsNext = !isLast && samples[i + 1].session < sample.session
-            let droppedFromPrev = i > 0 && sample.session < samples[i - 1].session
+            let dropsNext = !isLast && drops(sample, samples[i + 1])
+            let droppedFromPrev = i > 0 && drops(samples[i - 1], sample)
             if let last = kept.last, !isLast, !dropsNext, !droppedFromPrev,
                sample.date.timeIntervalSince(last.date) < minGap { continue }
             kept.append(sample)
@@ -355,8 +359,8 @@ private struct BurnChartView: View {
 
     /// Left edge of the visible window. `nil` is not "some position" — it means *latched to live*:
     /// the window follows `defaultStart` as new samples land. Any non-nil value pins an absolute
-    /// date and stops following, which is why `onEnded` re-latches when a drag lands back at the
-    /// right edge (see `endPan`).
+    /// date and stops following, which is why `onEnded` re-latches when a drag lands back on the
+    /// live position (see `endPan`). Reset to live each time the chart appears.
     @State private var windowStart: Date?
 
     /// `effectiveStart` captured when the current drag began. Held for the whole gesture because
@@ -396,10 +400,10 @@ private struct BurnChartView: View {
         return max(nowAnchor, furthest.addingTimeInterval(range.interval * 0.05))
     }
 
-    /// The window the chart opens on: latest readings flush against the right edge. Scrolling
-    /// right from here walks into the forecast.
+    /// The window the chart opens on: NOW in the middle, recent history on the left and the
+    /// near forecast on the right. Scrolling right from here walks further into the forecast.
     private var defaultStart: Date { defaultStart(interval: range.interval) }
-    private func defaultStart(interval: TimeInterval) -> Date { nowAnchor.addingTimeInterval(-interval) }
+    private func defaultStart(interval: TimeInterval) -> Date { nowAnchor.addingTimeInterval(-interval / 2) }
 
     /// Pan bounds. The lower one dips below `dataStart` when history is shorter than the selected
     /// range, so the window keeps its full width (and therefore its scale) instead of squeezing to
@@ -489,6 +493,12 @@ private struct BurnChartView: View {
             chartLegend
             forecastSummary
         }
+        // Every opening of the window starts at the live position (NOW centred), not wherever
+        // the chart was last dragged to.
+        .onAppear {
+            panAnchor = nil
+            windowStart = nil
+        }
         // The capture list pins the range being left, so the zoom can be measured from it.
         .onChange(of: range) { [range] newRange in
             panAnchor = nil
@@ -497,7 +507,7 @@ private struct BurnChartView: View {
     }
 
     /// Window start after a zoom change that keeps NOW at the same spot on screen. Latched to live
-    /// stays latched (NOW on the right edge either way). With NOW panned out of view there is no
+    /// stays latched (NOW in the middle either way). With NOW panned out of view there is no
     /// spot to keep, so the zoom centres on the middle of the window instead.
     private func zoomedStart(from oldInterval: TimeInterval, to newInterval: TimeInterval) -> Date? {
         guard let pinned = windowStart else { return nil }
@@ -583,10 +593,9 @@ private struct BurnChartView: View {
             }
     }
 
-    /// Re-latch to live when a drag finishes at (or all but at) the right edge. Without this the
-    /// chart would *look* live while being pinned to an absolute date, and would appear to drift
-    /// left on its own as each new sample advanced `defaultStart` — and dragging to the right edge
-    /// is the natural gesture here, so that would be routine rather than theoretical.
+    /// Re-latch to live when a drag finishes at (or all but at) the live position. Without this
+    /// the chart would *look* live while being pinned to an absolute date, and would appear to
+    /// drift left on its own as each new sample advanced `defaultStart`.
     private func endPan() {
         guard let pinned = windowStart else { return }
         let live = clamp(defaultStart)
@@ -1109,14 +1118,15 @@ private struct BurnChartView: View {
         }
 
         // Weekly reference uses the selected calendar exclusions, with a linear fallback.
-        func addWeekdayPaced(_ series: String, windowStart: Date, duration: TimeInterval) {
-            guard windowStart.addingTimeInterval(duration) > lo, windowStart < hi else { return }
-            if let points = weekdayPacedPoints(windowStart: windowStart, duration: duration,
-                                               excludeWeekends: excludeWeekends, excludeNights: excludeNights) {
-                lines.append((series, points.map { ($0.date, $0.percent) }))
-            } else {
-                addLinear(series, windowStart: windowStart, duration: duration)
-            }
+        // `cutAt` ends the line early where the window was reset before its schedule.
+        func addWeekdayPaced(_ series: String, windowStart: Date, duration: TimeInterval, cutAt: Date? = nil) {
+            let end = min(cutAt ?? .distantFuture, windowStart.addingTimeInterval(duration))
+            guard end > lo, windowStart < hi else { return }
+            let points = weekdayPacedPoints(windowStart: windowStart, duration: duration,
+                                            excludeWeekends: excludeWeekends, excludeNights: excludeNights)?
+                .map { ($0.date, $0.percent) }
+                ?? [(windowStart, 0), (windowStart.addingTimeInterval(duration), 100)]
+            lines.append((series, cutPolyline(points, at: end)))
         }
 
         // Per-session ideal lines only where a 5h window is wide enough to read; on 14d/30d
@@ -1136,10 +1146,24 @@ private struct BurnChartView: View {
             }
         }
 
+        // A weekly window reset ahead of its schedule (a quota grant) keeps the schedule: the
+        // next reset is still the old one. So the window splits at the observed drop — the old
+        // reference stops there, and a fresh one climbs from 0 % at the drop to 100 % at the
+        // scheduled reset. Without this the line ran on from the scheduled start, sitting at
+        // ~50 % right where the real usage restarted from zero.
         func addPeriodic(_ series: String, _ window: RateWindow?) {
             guard let window, let resetsAt = window.resetsAt else { return }
-            for windowStart in periodicWindowStarts(resetsAt: resetsAt, duration: window.windowDuration, visibleFrom: lo, visibleTo: hi) {
-                addWeekdayPaced(series, windowStart: windowStart, duration: window.windowDuration)
+            let duration = window.windowDuration
+            let early = offScheduleResets(samples.compactMap { s in s.weekly.map { (s.date, $0) } },
+                                          resetsAt: resetsAt, duration: duration)
+            for windowStart in periodicWindowStarts(resetsAt: resetsAt, duration: duration, visibleFrom: lo, visibleTo: hi) {
+                let windowEnd = windowStart.addingTimeInterval(duration)
+                var paceStart = windowStart
+                for cut in early.filter({ $0 > windowStart && $0 < windowEnd }) + [windowEnd] {
+                    addWeekdayPaced(series, windowStart: paceStart,
+                                    duration: windowEnd.timeIntervalSince(paceStart), cutAt: cut)
+                    paceStart = cut
+                }
             }
         }
         // Only the two shared limits get an ideal-pace reference: the 5h session (above) and the
@@ -1566,6 +1590,32 @@ func periodicWindowStarts(resetsAt: Date, duration: TimeInterval, visibleFrom: D
     return starts
 }
 
+/// Resets of a fixed-schedule window that happened off its schedule: a drop in percent from at
+/// least `minPeak`, placed at the midpoint between the two samples, and farther than `tolerance`
+/// from every scheduled boundary (multiples of `duration` from `resetsAt`). Scheduled resets are
+/// already handled by `periodicWindowStarts`; the tolerance absorbs the sampling gap around them.
+func offScheduleResets(_ points: [(Date, Double)], resetsAt: Date, duration: TimeInterval,
+                       minPeak: Double = 5, tolerance: TimeInterval = 2 * 3600) -> [Date] {
+    guard duration > 0, points.count > 1 else { return [] }
+    var resets: [Date] = []
+    for i in 1..<points.count where points[i].1 < points[i - 1].1 && points[i - 1].1 >= minPeak {
+        let gap = points[i].0.timeIntervalSince(points[i - 1].0)
+        let reset = points[i - 1].0.addingTimeInterval(gap / 2)
+        let phase = reset.timeIntervalSince(resetsAt).truncatingRemainder(dividingBy: duration)
+        let fromBoundary = min(abs(phase), duration - abs(phase))
+        if fromBoundary > max(tolerance, gap / 2) { resets.append(reset) }
+    }
+    return resets
+}
+
+/// A date-ordered polyline ending at `date`: vertices past it dropped, the last one placed on
+/// `date` at the interpolated value. Unchanged when `date` is at or beyond its end.
+func cutPolyline(_ points: [(Date, Double)], at date: Date) -> [(Date, Double)] {
+    guard let last = points.last, date < last.0,
+          let value = interpolatedPercent(points, at: date) else { return points }
+    return points.filter { $0.0 < date } + [(date, value)]
+}
+
 #if DEBUG
 /// Sanity-checks the slope/reset logic on synthetic samples; called once at launch in DEBUG.
 func runFastBurnSegmentsSelfCheck() {
@@ -1603,6 +1653,22 @@ func runFastBurnSegmentsSelfCheck() {
     // A real drop from a meaningful peak (50 % → 0) still counts as a reset.
     let real = sessionWindows(in: [s(0, 0), s(4, 50), s(8, 0)], duration: dur, lastResetsAt: reset)
     assert(real.count == 2)
+
+    // offScheduleResets: the scheduled weekly drop (5 min after the boundary) is ignored, an
+    // early drop mid-window (quota grant, 100 % → 0) is reported at the samples' midpoint.
+    let weekDur: TimeInterval = 7 * 86400
+    let sched = Date(timeIntervalSince1970: 1_700_000_000)
+    let weekPts: [(Date, Double)] = [
+        (sched.addingTimeInterval(-600), 96), (sched.addingTimeInterval(300), 0),
+        (sched.addingTimeInterval(3 * 86400), 100), (sched.addingTimeInterval(3 * 86400 + 900), 0),
+        (sched.addingTimeInterval(3 * 86400 + 1800), 1)
+    ]
+    let early = offScheduleResets(weekPts, resetsAt: sched.addingTimeInterval(weekDur), duration: weekDur)
+    assert(early == [sched.addingTimeInterval(3 * 86400 + 450)])
+    // cutPolyline ends a line at the cut, interpolating the last vertex.
+    let cut = cutPolyline([(sched, 0), (sched.addingTimeInterval(100), 100)], at: sched.addingTimeInterval(25))
+    assert(cut.count == 2 && abs(cut[1].1 - 25) < 1e-9)
+    assert(cutPolyline([(sched, 0), (sched.addingTimeInterval(100), 100)], at: sched.addingTimeInterval(200)).count == 2)
 
     // Weekend-aware weekly pacing — structural invariants only, so the check is timezone-robust
     // (no absolute-percentage assumptions that depend on the machine's calendar/zone).
