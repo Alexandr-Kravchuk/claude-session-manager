@@ -16,13 +16,27 @@ struct Recommendation {
 
     var statusSymbol: String {
         if isHeadroom { return "arrow.up.circle.fill" }
-        switch urgency {
+        return urgency.statusSymbol
+    }
+}
+
+extension Urgency {
+    var statusSymbol: String {
+        switch self {
         case .low: return "checkmark.circle.fill"
         case .medium: return "exclamationmark.circle.fill"
         case .high: return "exclamationmark.triangle.fill"
         case .critical: return "xmark.circle.fill"
         }
     }
+}
+
+/// Urgency of each menubar window on its own, so a tight weekly doesn't paint the 5h icon.
+struct WindowUrgencies {
+    let session: Urgency
+    /// Weekly plus the per-model weekly cap — both are 7-day budgets. Nil without a weekly window.
+    let weekly: Urgency?
+    let weeklyHeadroom: Bool
 }
 
 struct Recommender {
@@ -120,6 +134,20 @@ struct Recommender {
             weeklyLine: weeklyRec?.line,
             modelLine: modelRec?.line
         )
+    }
+
+    func windowUrgencies() -> WindowUrgencies {
+        let session = evalSession(snapshot.session).urgency
+        guard let weekly = snapshot.weekly else {
+            return WindowUrgencies(session: session, weekly: nil, weeklyHeadroom: false)
+        }
+        let weeklyUrgency = [evalWeekly(weekly, label: "Weekly").urgency, evalModels()?.urgency]
+            .compactMap { $0 }
+            .max() ?? .low
+        let headroom = newPaceUI && weeklyUrgency == .low
+            && weekly.paceTier(kind: .weekly) == .idle
+            && weekly.projectedLeftAtReset != nil
+        return WindowUrgencies(session: session, weekly: weeklyUrgency, weeklyHeadroom: headroom)
     }
 
     private struct WindowEval {

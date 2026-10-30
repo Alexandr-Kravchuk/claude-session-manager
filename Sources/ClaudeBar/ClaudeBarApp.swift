@@ -24,13 +24,7 @@ struct ClaudeBarApp: App {
                 .environmentObject(store)
                 .environmentObject(updater)
         } label: {
-            HStack(spacing: 3) {
-                Image(systemName: store.menuBarIcon)
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundColor(store.statusColor)
-                Text(store.menuBarText)
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-            }
+            Image(nsImage: MenuBarLabel.render(store.menuBarItems))
         }
         .menuBarExtraStyle(.window)
 
@@ -39,6 +33,34 @@ struct ClaudeBarApp: App {
                 .environmentObject(store)
         }
         .windowResizability(.contentMinSize)
+    }
+}
+
+/// MenuBarExtra keeps only the first Image and Text of its label, so a per-window
+/// icon + text row has to reach the menubar as one pre-rendered image.
+@MainActor
+enum MenuBarLabel {
+    static func render(_ items: [UsageStore.MenuBarItem]) -> NSImage {
+        let content = HStack(spacing: 6) {
+            ForEach(items) { item in
+                HStack(spacing: 3) {
+                    Image(systemName: item.symbol)
+                        .font(.system(size: 13))
+                    Text(item.text)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                }
+            }
+        }
+        .foregroundColor(.black)
+        .frame(height: 18)
+        .fixedSize()
+
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
+        let image = renderer.nsImage ?? NSImage()
+        // Template: the menubar tints it for light/dark, like the system's own items.
+        image.isTemplate = true
+        return image
     }
 }
 

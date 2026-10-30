@@ -412,6 +412,45 @@ final class UsageStore: ObservableObject {
         }
     }
 
+    struct MenuBarItem: Identifiable {
+        let id: String
+        let symbol: String
+        let color: Color
+        let text: String
+    }
+
+    /// One icon + text per window, each icon coloured by its own window's urgency.
+    var menuBarItems: [MenuBarItem] {
+        guard let snap = snapshot, !isStale, recoveryText(for: snap.session) == nil else {
+            return [MenuBarItem(id: "status", symbol: menuBarIcon, color: statusColor, text: menuBarText)]
+        }
+        let urgencies = Recommender(snapshot: snap, newPaceUI: newPaceUIEnabled, activity: activity).windowUrgencies()
+        var items = [MenuBarItem(
+            id: "5h",
+            symbol: urgencies.session.statusSymbol,
+            color: Self.color(for: urgencies.session),
+            text: menuBarSegment(label: "5h", window: snap.session)
+        )]
+        if let weekly = snap.weekly, let weeklyUrgency = urgencies.weekly {
+            items.append(MenuBarItem(
+                id: "7d",
+                symbol: urgencies.weeklyHeadroom ? "arrow.up.circle.fill" : weeklyUrgency.statusSymbol,
+                color: urgencies.weeklyHeadroom ? .blue : Self.color(for: weeklyUrgency),
+                text: menuBarSegment(label: "7d", window: weekly)
+            ))
+        }
+        return items
+    }
+
+    private static func color(for urgency: Urgency) -> Color {
+        switch urgency {
+        case .low: return .green
+        case .medium: return .yellow
+        case .high: return .orange
+        case .critical: return .red
+        }
+    }
+
     private func menuBarSegment(label: String, window: RateWindow) -> String {
         if window.remainingPercent < 5, let recovery = recoveryText(for: window) {
             return "\(label) \(recovery)"
