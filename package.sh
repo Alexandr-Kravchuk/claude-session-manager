@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 
 APP_NAME="ClaudeBar"
 BUNDLE_ID="com.claudebar.app"
-VERSION="${VERSION:-1.0}"
+VERSION="${VERSION:-$(cat VERSION)}"
 APP_PATH="${APP_PATH:-/Applications/$APP_NAME.app}"
 
 source "$(dirname "$0")/preflight.sh"

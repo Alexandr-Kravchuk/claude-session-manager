@@ -19,7 +19,7 @@ enum UpdateError: LocalizedError {
 
 @MainActor
 final class AutoUpdater: ObservableObject {
-    static let currentVersion = "2.19.0"
+    static let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
     static let autoUpdateKey = "com.claudebar.autoUpdate"
 
     @Published var latestVersion: String?

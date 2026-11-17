@@ -10,6 +10,8 @@ struct MenuView: View {
     @AppStorage(NotificationManager.enabledKey) private var notificationsEnabled = true
     @AppStorage(LimitAlertPresenter.enabledKey) private var limitDialogEnabled = true
 
+    @AppStorage(Telemetry.enabledKey) private var telemetryEnabled = false
+
     var body: some View {
         VStack(spacing: 0) {
             headerSection
@@ -35,7 +37,16 @@ struct MenuView: View {
         }
         .frame(width: 340)
         .background(Color(NSColor.windowBackgroundColor))
-        .onAppear { Task { await store.refreshIfStale() } }
+        .onAppear {
+            Telemetry.feature("menu_opened")
+            Task { await store.refreshIfStale() }
+        }
+        .onChange(of: fillBars) { Telemetry.setting("fill_bars_as_used", enabled: $0) }
+        .onChange(of: newPaceUI) { Telemetry.setting("new_pace_ui", enabled: $0) }
+        .onChange(of: notificationsEnabled) { Telemetry.setting("limit_notifications", enabled: $0) }
+        .onChange(of: limitDialogEnabled) { Telemetry.setting("critical_limit_dialog", enabled: $0) }
+        .onChange(of: autoUpdate) { Telemetry.setting("auto_update", enabled: $0) }
+        .onChange(of: store.launchAtLogin) { Telemetry.setting("launch_at_login", enabled: $0) }
     }
 
     private var headerSection: some View {
@@ -500,28 +511,48 @@ struct MenuView: View {
 
             Divider().padding(.horizontal, 14)
 
+            Toggle("Share anonymous usage statistics", isOn: $telemetryEnabled)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+
+            Button("About Usage Statistics…") { Telemetry.showDetails() }
+                .buttonStyle(.plain)
+                .font(.system(size: 10))
+                .foregroundColor(.accentColor)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 6)
+
             updateSection
 
-            HStack {
+            HStack(spacing: 4) {
                 Text("v\(AutoUpdater.currentVersion)")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary.opacity(0.5))
                 if let updated = store.lastUpdated {
                     let timeColor = store.isStale ? Color.orange.opacity(0.9) : Color.secondary.opacity(0.7)
-                    Text(updated, style: .relative)
+                    HStack(spacing: 0) {
+                        Text(updated, style: .relative)
+                        Text(" ago")
+                    }
                         .font(.system(size: 10))
                         .foregroundColor(timeColor)
-                    + Text(" ago")
-                        .font(.system(size: 10))
-                        .foregroundColor(timeColor)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
                 Spacer()
                 Button {
+                    Telemetry.feature("statistics_opened")
                     openWindow(id: StatisticsWindow.id)
                     NSApp.activate(ignoringOtherApps: true)
                 } label: {
                     Label("Statistics", systemImage: "chart.bar.xaxis")
                         .font(.system(size: 11))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.accentColor)
@@ -529,11 +560,14 @@ struct MenuView: View {
                 Divider().frame(height: 14)
 
                 Button {
+                    Telemetry.feature("manual_refresh")
                     Task { await store.refresh(force: true) }
                     Task { await updater.checkForUpdates(autoInstall: true) }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                         .font(.system(size: 11))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.accentColor)
@@ -544,11 +578,13 @@ struct MenuView: View {
                 Button { NSApp.terminate(nil) } label: {
                     Label("Quit", systemImage: "power")
                         .font(.system(size: 11))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
     }
@@ -574,6 +610,7 @@ struct MenuView: View {
                     .font(.system(size: 11, weight: .medium))
                 Spacer()
                 Button("Update") {
+                    Telemetry.feature("update_clicked")
                     Task { await updater.performUpdate() }
                 }
                 .font(.system(size: 11))

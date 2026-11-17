@@ -28,6 +28,8 @@ struct StatisticsContent: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .onChange(of: tab) { Telemetry.feature("statistics_tab", value: $0.rawValue) }
+        .onChange(of: range) { Telemetry.feature("history_range", value: String(describing: $0)) }
         .frame(minWidth: 760, minHeight: 570)
         .background(Color(NSColor.windowBackgroundColor))
     }

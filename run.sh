@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build, install, and launch ClaudeBar in the background.
 # Uses single native arch for speed (vs. universal in package.sh / release.sh).
-set -e
+set -eo pipefail
 cd "$(dirname "$0")"
 
 source "$(dirname "$0")/preflight.sh"
@@ -9,7 +9,7 @@ source "$(dirname "$0")/preflight.sh"
 APP_NAME="ClaudeBar"
 BUNDLE_ID="com.claudebar.app"
 APP_PATH="/Applications/$APP_NAME.app"
-VERSION="$(plutil -extract CFBundleShortVersionString raw "$APP_PATH/Contents/Info.plist" 2>/dev/null || echo "dev")"
+VERSION="${VERSION:-$(cat VERSION)}"
 
 pkill -x ClaudeBar 2>/dev/null || true
 sleep 0.3

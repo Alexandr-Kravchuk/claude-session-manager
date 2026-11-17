@@ -23,6 +23,8 @@ A macOS menu bar app that shows your Claude Code usage limits and tells you when
 ./install.sh   # build, install to ~/.local/bin, autostart at login (LaunchAgent)
 ```
 
+Builds use the repository `VERSION` file unless `VERSION=x.y.z` is explicitly provided. The UI, update checks and telemetry read the built app’s bundle version.
+
 Other scripts:
 
 ```bash
@@ -51,6 +53,10 @@ ClaudeBar touches your Claude credentials, so here is exactly what it does:
 - When auto-update is enabled, the app polls `api.github.com` for releases of this repository. The OAuth token is never sent there.
 
 The usage endpoint is undocumented and gated to the official client, so ClaudeBar identifies itself with the CLI's User-Agent. It may change or stop working at any time.
+
+## Optional usage analytics
+
+“Share anonymous usage statistics” enables Aptabase analytics hosted in the EU. The first launch asks for permission before any events are sent; declining keeps it off. “About Usage Statistics…” in the menu explains the data collected. Events cover app startup, menu and statistics usage, manual refresh/update actions, and changes to options. Aptabase includes the app version, OS version, device model and language, and may derive country from the connection. No Claude credentials, usage limits, project names, file contents, or activity history are sent. Your choice (including declining) is saved in macOS preferences and survives app updates; later versions do not ask again. Change it anytime in the menu. Disable the option to stop recording new events.
 
 ## Disclaimer
 
