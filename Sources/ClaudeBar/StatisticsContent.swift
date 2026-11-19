@@ -8,6 +8,7 @@ struct StatisticsContent: View {
     let samples: [UsageSample]
     let snapshot: UsageSnapshot?
     let lastUpdated: Date?
+    let openCount: Int
 
     @State private var tab: StatisticsTab = .usage
     @AppStorage("com.claudebar.historyRange") private var range: HistoryRange = .oneDay
@@ -104,6 +105,7 @@ struct StatisticsContent: View {
                         range: range,
                         chartHeight: chartHeight
                     )
+                    .id(openCount)
                     HStack(spacing: 6) {
                         Image(systemName: "info.circle")
                         Text("Lines show percent used; drops to zero are quota-window resets; dots are the latest recorded values. Drag the chart sideways to move through time — right of NOW is the projected run-out.")
@@ -411,7 +413,7 @@ private struct BurnChartView: View {
     /// range, so the window keeps its full width (and therefore its scale) instead of squeezing to
     /// fit whatever has been recorded so far. Parameterised by window width so a zoom change can
     /// still evaluate the bounds of the range it is leaving.
-    private func panMin(interval: TimeInterval) -> Date { min(dataStart, defaultStart(interval: interval)) }
+    private func panMin(interval: TimeInterval) -> Date { min(dataStart, nowAnchor.addingTimeInterval(-interval)) }
     private func panMax(interval: TimeInterval) -> Date {
         max(defaultStart(interval: interval), timelineEnd.addingTimeInterval(-interval))
     }

@@ -5,13 +5,15 @@ import SwiftUI
 /// charts renderable in isolation for testing.
 struct StatisticsView: View {
     @EnvironmentObject var store: UsageStore
+    let openCount: Int
 
     var body: some View {
         StatisticsLiveContent(
             history: store.history,
             activity: store.activity,
             snapshot: store.snapshot,
-            lastUpdated: store.lastUpdated
+            lastUpdated: store.lastUpdated,
+            openCount: openCount
         )
     }
 }
@@ -23,13 +25,15 @@ private struct StatisticsLiveContent: View {
     let activity: ActivityProfile
     let snapshot: UsageSnapshot?
     let lastUpdated: Date?
+    let openCount: Int
 
     var body: some View {
         StatisticsContent(
             activity: activity,
             samples: history.samples,
             snapshot: snapshot,
-            lastUpdated: lastUpdated
+            lastUpdated: lastUpdated,
+            openCount: openCount
         )
     }
 }

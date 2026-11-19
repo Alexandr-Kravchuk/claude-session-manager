@@ -19,10 +19,11 @@ struct ClaudeBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = UsageStore()
     @StateObject private var updater = AutoUpdater()
+    @State private var statisticsOpenCount = 0
 
     var body: some Scene {
         MenuBarExtra {
-            MenuView()
+            MenuView { statisticsOpenCount += 1 }
                 .environmentObject(store)
                 .environmentObject(updater)
         } label: {
@@ -31,7 +32,7 @@ struct ClaudeBarApp: App {
         .menuBarExtraStyle(.window)
 
         Window("Claude Code Statistics", id: StatisticsWindow.id) {
-            StatisticsView()
+            StatisticsView(openCount: statisticsOpenCount)
                 .environmentObject(store)
         }
         .windowResizability(.contentMinSize)

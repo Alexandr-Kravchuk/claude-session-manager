@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct MenuView: View {
+    let onOpenStatistics: () -> Void
+
     @EnvironmentObject var store: UsageStore
     @EnvironmentObject var updater: AutoUpdater
     @Environment(\.openWindow) private var openWindow
@@ -546,6 +548,7 @@ struct MenuView: View {
                 Spacer()
                 Button {
                     Telemetry.feature("statistics_opened")
+                    onOpenStatistics()
                     openWindow(id: StatisticsWindow.id)
                     NSApp.activate(ignoringOtherApps: true)
                 } label: {
