@@ -452,14 +452,14 @@ final class UsageStore: ObservableObject {
     }
 
     private func menuBarSegment(label: String, window: RateWindow) -> String {
-        if window.remainingPercent < 5, let recovery = recoveryText(for: window) {
+        if let recovery = recoveryText(for: window) {
             return "\(label) \(recovery)"
         }
         return "\(label) \(Int(window.remainingPercent.rounded()))%"
     }
 
     private func recoveryText(for window: RateWindow) -> String? {
-        guard window.remainingPercent < 5,
+        guard window.remainingPercent == 0,
               let resetsAt = window.resetsAt,
               let resetIn = window.timeUntilReset else { return nil }
         return "\(formatResetMoment(resetsAt)) (\(formatDuration(resetIn)))"
